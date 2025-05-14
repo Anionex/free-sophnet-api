@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+aiohttp
+orjson
+pydantic
+loguru
+pyyaml
+uvloop
+httptools
