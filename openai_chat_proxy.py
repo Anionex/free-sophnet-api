@@ -4,6 +4,7 @@ from typing import AsyncGenerator, Dict, List, Optional, Union, Any
 import random
 from datetime import datetime
 import platform
+import multiprocessing
 
 import aiohttp
 import orjson
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 from loguru import logger
 import yaml
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 # 设置默认配置
 DEFAULT_CONFIG = {
@@ -32,7 +34,12 @@ DEFAULT_CONFIG = {
     "log_requests": False,
     "log_responses": False,
     "ip_whitelist": [],
-    "ip_blacklist": []
+    "ip_blacklist": [],
+    "connection_limit": 1000,               # 新增: HTTP连接池连接数上限
+    "connection_limit_per_host": 100,       # 新增: 每个主机的连接数上限
+    "keepalive_timeout": 60,                # 新增: 连接保持活跃时间(秒)
+    "workers": None,                        # 新增: 工作进程数，默认为CPU核心数
+    "log_level": "INFO"                     # 新增: 日志级别
 }
 
 # 加载配置文件
@@ -52,16 +59,34 @@ TIMEOUT = config["timeout"]
 BASE_URL = config["base_url"]
 ROUTE_PREFIX = config["route_prefix"]
 PROXY = config["proxy"]
-PROXY_URL_PATH = config["proxy_url_path"]  # 新增: 获取自定义转发目标路径
-FIELD_ALIASES = config["field_aliases"]      # 新增: 获取字段别名映射
+PROXY_URL_PATH = config["proxy_url_path"]
+FIELD_ALIASES = config["field_aliases"]
 API_KEYS = config["api_keys"]
 LOG_REQUESTS = config["log_requests"]
 LOG_RESPONSES = config["log_responses"]
 IP_WHITELIST = config["ip_whitelist"]
 IP_BLACKLIST = config["ip_blacklist"]
-DEFAULT_TEMPERATURE = config["default_temperature"]
-DEFAULT_MAX_TOKENS = config["default_max_tokens"]
-DEFAULT_MODEL = config["default_model"]
+DEFAULT_TEMPERATURE = config.get("default_temperature", 1.0)
+DEFAULT_MAX_TOKENS = config.get("default_max_tokens", 2048)
+DEFAULT_MODEL = config.get("default_model", "gpt-3.5-turbo")
+# 新增配置参数
+CONNECTION_LIMIT = config["connection_limit"]
+CONNECTION_LIMIT_PER_HOST = config["connection_limit_per_host"]
+KEEPALIVE_TIMEOUT = config["keepalive_timeout"]
+WORKERS = config["workers"] or multiprocessing.cpu_count()
+LOG_LEVEL = config["log_level"]
+
+# 设置日志级别
+logger.remove()
+logger.add(
+    "openai_chat_proxy_detailed.log",
+    level=LOG_LEVEL,
+    rotation="10 MB",
+    compression="zip",
+    retention="1 week"
+)
+logger.add(lambda msg: print(msg, end=""), level=LOG_LEVEL)
+
 # 检查是否启用IP验证
 VALIDATE_IP = bool(IP_WHITELIST or IP_BLACKLIST)
 
@@ -112,7 +137,7 @@ async def get_anonymous_token(client_session: aiohttp.ClientSession) -> Optional
                     return f"anon-{token}"
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         logger.error(f"获取匿名token时出错: {e}")
-        await asyncio.sleep(random.uniform(1, 3))  # 错误后等待
+        await asyncio.sleep(random.uniform(0.5, 1.0))  # 减少错误后等待时间
     
     return None
 
@@ -134,7 +159,8 @@ async def get_new_api_key(frontend_key: str, client_session: Optional[aiohttp.Cl
     # 创建一个临时会话或使用提供的会话
     close_session = False
     if client_session is None:
-        client_session = aiohttp.ClientSession()
+        connector = aiohttp.TCPConnector(limit=100, limit_per_host=20)
+        client_session = aiohttp.ClientSession(connector=connector)
         close_session = True
     
     try:
@@ -152,8 +178,35 @@ async def get_new_api_key(frontend_key: str, client_session: Optional[aiohttp.Cl
     logger.warning(f"前端key {frontend_key} 没有对应的API key，且无法动态获取")
     return None
 
-# FastAPI应用
-app = FastAPI(title="openai-chat-proxy", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动事件
+    await forwarder.build_client()
+    logger.info(f"OpenAI 聊天代理服务已启动")
+    logger.info(f"转发目标: {BASE_URL}")
+    logger.info(f"转发路径: {PROXY_URL_PATH}")
+    if FIELD_ALIASES:
+        logger.info(f"字段别名: {FIELD_ALIASES}")
+    if PROXY:
+        logger.info(f"使用代理: {PROXY}")
+    logger.info(f"监听路径: {ROUTE_PREFIX}{CHAT_COMPLETION_ROUTE}")
+    logger.info(f"连接池配置: 总连接数={CONNECTION_LIMIT}, 每主机连接数={CONNECTION_LIMIT_PER_HOST}, 连接保活={KEEPALIVE_TIMEOUT}秒")
+    logger.info(f"工作进程数: {WORKERS}")
+    
+    # 初始化所有API keys映射
+    for frontend_key, actual_keys in API_KEYS.items():
+        if isinstance(actual_keys, list) and actual_keys:
+            CURRENT_KEY_MAPPING[frontend_key] = actual_keys[0]
+            logger.info(f"初始化API key映射: {frontend_key} -> {actual_keys[0][:5]}***")
+    
+    yield  # 应用运行
+    
+    # 关闭事件
+    await forwarder.close()
+    logger.info("OpenAI 聊天代理服务已关闭")
+
+# 使用lifespan上下文管理器创建应用
+app = FastAPI(title="openai-chat-proxy", version="0.1.0", lifespan=lifespan)
 
 # CORS中间件
 app.add_middleware(
@@ -239,8 +292,20 @@ class ChatForwarder:
     
     async def build_client(self):
         """异步构建HTTP客户端"""
-        connector = aiohttp.TCPConnector(limit=500, limit_per_host=0, force_close=False)
-        self.client = aiohttp.ClientSession(connector=connector, timeout=self.timeout)
+        # 优化HTTP连接池
+        connector = aiohttp.TCPConnector(
+            limit=CONNECTION_LIMIT,
+            limit_per_host=CONNECTION_LIMIT_PER_HOST,
+            force_close=False,
+            enable_cleanup_closed=True,
+            keepalive_timeout=KEEPALIVE_TIMEOUT,
+            ssl=False  # 禁用SSL验证提高性能，但请注意在生产环境中可能需要启用
+        )
+        self.client = aiohttp.ClientSession(
+            connector=connector, 
+            timeout=self.timeout,
+            json_serialize=orjson.dumps  # 使用orjson序列化JSON数据
+        )
     
     async def close(self):
         """关闭HTTP客户端连接"""
@@ -273,12 +338,15 @@ class ChatForwarder:
         Returns:
             str: 客户端IP地址
         """
-        x_real_ip = request.headers.get("x-real-ip")
-        if x_real_ip:
-            return x_real_ip
-        else:
-            client_host = request.client.host
-            return client_host
+        # 添加转发代理头部支持
+        for header in ["x-real-ip", "x-forwarded-for"]:
+            ip = request.headers.get(header)
+            if ip:
+                # 如果是多个IP的列表，取第一个
+                return ip.split(",")[0].strip()
+        
+        # 回退到客户端直连IP
+        return request.client.host
     
     async def handle_authorization(self, auth_header: str) -> str:
         """处理授权信息
@@ -316,8 +384,6 @@ class ChatForwarder:
                 return bearer_prefix + actual_key
             # 处理特殊的自动获取API key的情况
             else:
-                # 如果key不在API_KEYS中，也不是sophnet-auto开头，直接返回原始auth_header
-                # 这样可以避免401 key not found错误
                 return auth_header
         
         return auth_header
@@ -341,6 +407,7 @@ class ChatForwarder:
                 data=data,
                 headers=headers,
                 proxy=self.proxy,
+                allow_redirects=True
             )
         except (
             aiohttp.ServerTimeoutError,
@@ -374,37 +441,21 @@ class ChatForwarder:
                         json_content = orjson.loads(content)
                         if isinstance(json_content, dict) and json_content.get("status") == 40310:
                              logger.warning(f"aiter_bytes (non-stream): Encountered 40310. Key refresh is handled by reverse_proxy. Message: {json_content.get('message', '未知错误')}")
-                    except Exception: # orjson.JSONDecodeError, etc.
+                    except Exception:
                         pass # Ignore parsing errors for this logging
                 yield content
                 return
             
+            # 使用更大的缓冲区读取流
+            buffer_size = 64 * 1024  # 64KB
             # Expected path: Processing a live, successful stream
-            async for chunk in response.content.iter_any():
-                if LOG_RESPONSES:
+            async for chunk in response.content.iter_chunked(buffer_size):
+                if LOG_RESPONSES and logger.level <= 10:  # 只在DEBUG级别记录详细响应
                     try:
                         logger.debug(f"响应数据: {chunk.decode('utf-8')}")
                     except UnicodeDecodeError:
                         logger.debug(f"响应数据 (bytes): {chunk}")
-                
-                # Optional: Log if 40310 appears mid-stream (no retry from here)
-                try:
-                    chunk_str = chunk.decode('utf-8')
-                    data_prefix = "data: "
-                    if chunk_str.startswith(data_prefix): # Check if it's an SSE data line
-                        json_part = chunk_str[len(data_prefix):].strip()
-                        if json_part and json_part != "[DONE]": # Ensure there's content and it's not the end signal
-                            try:
-                                parsed_json = orjson.loads(json_part)
-                                if isinstance(parsed_json, dict) and parsed_json.get("status") == 40310:
-                                    logger.warning(f"aiter_bytes (stream): Detected 40310 mid-stream. Message: {parsed_json.get('message', 'N/A')}. This occurrence will not trigger a retry.")
-                            except orjson.JSONDecodeError:
-                                pass # Not a valid JSON object after "data: "
-                except UnicodeDecodeError:
-                    pass # Chunk not UTF-8, cannot be our specific JSON error format
-                except Exception as e: 
-                    logger.error(f"Error during mid-stream 40310 check: {e}")
-                    
+                  
                 yield chunk
         except Exception as e:
             logger.error(f"Error in aiter_bytes response processing: {str(e)}")
@@ -431,7 +482,7 @@ class ChatForwarder:
             headers["authorization"] = await self.handle_authorization(auth_header)
             
         headers["Accept"] = "*/*"
-        # headers["Accept-Encoding"] = "gzip, deflate, br"
+        headers["Accept-Encoding"] = "gzip, deflate, br"  # 启用压缩以减少网络流量
         
         # 移除不需要转发的头信息
         headers_to_remove = ['host', 'content-length']
@@ -462,22 +513,25 @@ class ChatForwarder:
         
         if LOG_REQUESTS and original_data:
             try:
-                logger.info(f"CLIENT -> PROXY (raw body decoded): {original_data.decode('utf-8')}")
+                logger.debug(f"CLIENT -> PROXY (raw body decoded): {original_data.decode('utf-8')}")
             except UnicodeDecodeError:
-                logger.info(f"CLIENT -> PROXY (raw body bytes): {original_data!r}")
+                logger.debug(f"CLIENT -> PROXY (raw body bytes): {original_data!r}")
 
         if original_data and FIELD_ALIASES:
             try:
                 payload_dict = orjson.loads(original_data)
-                # 手动添加temperature字段
-                payload_dict["model"] = DEFAULT_MODEL
-                payload_dict["temperature"] = DEFAULT_TEMPERATURE 
-                payload_dict["max_tokens"] = DEFAULT_MAX_TOKENS
+                # 如果未设置模型和参数，添加默认值
+                if "model" not in payload_dict:
+                    payload_dict["model"] = DEFAULT_MODEL
+                if "temperature" not in payload_dict:
+                    payload_dict["temperature"] = DEFAULT_TEMPERATURE 
+                if "max_tokens" not in payload_dict:
+                    payload_dict["max_tokens"] = DEFAULT_MAX_TOKENS
                 transformed_dict = apply_field_aliases(payload_dict)
                 data = orjson.dumps(transformed_dict)
                 if LOG_REQUESTS:
-                    logger.info(f"原始请求数据: {payload_dict}")
-                    logger.info(f"转换后请求数据: {transformed_dict}")
+                    logger.debug(f"原始请求数据: {payload_dict}")
+                    logger.debug(f"转换后请求数据: {transformed_dict}")
             except Exception as e:
                 logger.error(f"处理请求数据时出错: {e}")
                 data = original_data
@@ -485,16 +539,16 @@ class ChatForwarder:
             data = original_data
             if data and LOG_REQUESTS:
                 try:
-                    logger.info(f"请求数据: {orjson.loads(data)}")
+                    logger.debug(f"请求数据: {orjson.loads(data)}")
                 except:
-                    logger.info(f"请求数据: [无法解析JSON]")
+                    logger.debug(f"请求数据: [无法解析JSON]")
 
         # Log the final data payload that will be sent to the backend
         if LOG_REQUESTS and data:
             try:
-                logger.info(f"PROXY -> BACKEND (final body decoded): {data.decode('utf-8')}")
+                logger.debug(f"PROXY -> BACKEND (final body decoded): {data.decode('utf-8')}")
             except UnicodeDecodeError:
-                logger.info(f"PROXY -> BACKEND (final body bytes): {data!r}")
+                logger.debug(f"PROXY -> BACKEND (final body bytes): {data!r}")
 
         final_response_to_send = None
 
@@ -504,7 +558,8 @@ class ChatForwarder:
             request_info = await self.prepare_request_info(request)
             
             auth_header_for_log = request_info["headers"].get("authorization", "None")
-            logger.info(f"Attempt {attempt + 1}/{self.MAX_RETRIES + 1} using Authorization: {auth_header_for_log[:25]}...")
+            if LOG_REQUESTS:
+                logger.debug(f"Attempt {attempt + 1}/{self.MAX_RETRIES + 1} using Authorization: {auth_header_for_log[:25]}...")
 
             target_response = await self.send_request(
                 method=request_info["method"],
@@ -515,7 +570,7 @@ class ChatForwarder:
 
             if target_response.status == 200 and \
                target_response.headers.get("content-type", "").startswith("text/event-stream"):
-                logger.info(f"Attempt {attempt + 1}: Successful stream response (status {target_response.status}). Forwarding.")
+                logger.debug(f"Attempt {attempt + 1}: Successful stream response (status {target_response.status}). Forwarding.")
                 return StreamingResponse(
                     self.aiter_bytes(target_response),
                     status_code=target_response.status,
@@ -546,7 +601,7 @@ class ChatForwarder:
                         await target_response.release()
                         if attempt < self.MAX_RETRIES:
                             logger.info(f"New key obtained. Retrying request (next attempt: {attempt + 2}).")
-                            await asyncio.sleep(random.uniform(0.5, 1.5)) # Small delay before retry
+                            await asyncio.sleep(random.uniform(0.3, 0.7)) # 减少重试间隔
                             continue
                         else:
                             logger.warning(f"New key obtained, but max retries ({self.MAX_RETRIES + 1}) reached. Failing with last error.")
@@ -555,7 +610,7 @@ class ChatForwarder:
                 else:
                     logger.warning("40310 error detected, but no current_request_frontend_key was set. Cannot refresh key.")
 
-            logger.info(f"Attempt {attempt + 1}: Forwarding this response (status: {target_response.status}). No further retries for this error type or max attempts reached.")
+            logger.debug(f"Attempt {attempt + 1}: Forwarding this response (status: {target_response.status}). No further retries for this error type or max attempts reached.")
             
             async def _final_content_streamer(content_bytes, original_resp_to_release):
                 try:
@@ -576,32 +631,7 @@ class ChatForwarder:
 # 创建转发器，传入自定义转发路径
 forwarder = ChatForwarder(BASE_URL, PROXY_URL_PATH, PROXY)
 
-@app.on_event("startup")
-async def startup():
-    """应用启动事件处理程序"""
-    await forwarder.build_client()
-    logger.info(f"OpenAI 聊天代理服务已启动")
-    logger.info(f"转发目标: {BASE_URL}")
-    logger.info(f"转发路径: {PROXY_URL_PATH}")
-    if FIELD_ALIASES:
-        logger.info(f"字段别名: {FIELD_ALIASES}")
-    if PROXY:
-        logger.info(f"使用代理: {PROXY}")
-    logger.info(f"监听路径: {ROUTE_PREFIX}{CHAT_COMPLETION_ROUTE}")
-    
-    # 初始化所有API keys映射
-    for frontend_key, actual_keys in API_KEYS.items():
-        if isinstance(actual_keys, list) and actual_keys:
-            CURRENT_KEY_MAPPING[frontend_key] = actual_keys[0]
-            logger.info(f"初始化API key映射: {frontend_key} -> {actual_keys[0][:5]}***")
-
-@app.on_event("shutdown")
-async def shutdown():
-    """应用关闭事件处理程序"""
-    await forwarder.close()
-    logger.info("OpenAI 聊天代理服务已关闭")
-
-@app.get("/healthz")
+@app.get("/health")
 def health_check():
     """健康检查接口"""
     return {"status": "ok"}
@@ -615,4 +645,10 @@ app.add_route(
 
 # 主函数
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    # 使用命令行参数直接启动uvicorn
+    import sys
+    sys.argv = ["uvicorn", "openai_chat_proxy:app", "--host", "0.0.0.0", "--port", "8000",
+               f"--workers={WORKERS}", f"--log-level={LOG_LEVEL.lower()}", 
+               "--loop=uvloop", "--http=httptools", "--limit-concurrency=1000",
+               "--backlog=2048", f"--timeout-keep-alive={5}"]
+    uvicorn.main()
