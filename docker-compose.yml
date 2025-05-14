@@ -1,0 +1,15 @@
+services:
+  openai_chat_proxy:
+    image: openai_chat_proxy
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ./log:/app/log
+      - ./openai_chat_proxy.py:/app/openai_chat_proxy.py
+    # stdin_open: true # docker run -i
+    # tty: true # docker run -t
+    # restart: always

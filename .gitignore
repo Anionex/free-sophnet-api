@@ -1,1 +1,4 @@
 openai-chat-proxy-config.yaml
+.venv
+/config.yml
+*.log

@@ -18,11 +18,12 @@
 ### 配置
 
 1. 复制示例配置文件并根据需要修改：
+
    ```
-   copy openai-chat-proxy-config.example.yaml openai-chat-proxy-config.yaml
+   copy config.yml.example config.yml
    ```
 
-2. 编辑 `openai-chat-proxy-config.yaml` 文件，设置你的 API 密钥和其他参数。
+2. 编辑 `config.yaml` 文件，设置你的 API 密钥和其他参数。
 
 ### 启动服务
 
@@ -30,11 +31,18 @@
 - 双击 `run_proxy.bat` 或 `run_proxy.ps1` 启动服务
 
 或者使用命令行：
+
 ```
 python openai_chat_proxy.py
 ```
 
 服务默认在 `0.0.0.0:8000` 上启动，可以通过修改代码中的端口号来更改。
+
+### 启动服务(docker)
+
+```
+docker compose up -d
+```
 
 ## 使用方法
 
@@ -124,6 +132,7 @@ curl -X POST http://localhost:8000/v1/chat/completions `
 ## 依赖库
 
 需要安装以下 Python 依赖：
+
 ```
 pip install fastapi uvicorn aiohttp pydantic loguru orjson pyyaml
 ```
@@ -134,4 +143,4 @@ pip install fastapi uvicorn aiohttp pydantic loguru orjson pyyaml
 
 ```
 http://localhost:8000/healthz
-``` 
+```

@@ -1,5 +1,4 @@
 import asyncio
-import os
 from typing import AsyncGenerator, Dict, List, Optional, Union, Any
 import random
 from datetime import datetime
@@ -43,7 +42,7 @@ DEFAULT_CONFIG = {
 }
 
 # 加载配置文件
-config_file_path = Path("openai-chat-proxy-config.yaml")
+config_file_path = Path("config.yml")
 if config_file_path.exists():
     with open(config_file_path, encoding='utf-8') as file:
         config = yaml.safe_load(file)
@@ -79,7 +78,7 @@ LOG_LEVEL = config["log_level"]
 # 设置日志级别
 logger.remove()
 logger.add(
-    "openai_chat_proxy_detailed.log",
+    "log/openai_chat_proxy_detailed.log",
     level=LOG_LEVEL,
     rotation="10 MB",
     compression="zip",
@@ -643,8 +642,7 @@ app.add_route(
     methods=["POST"],
 )
 
-# 主函数
-if __name__ == "__main__":
+def main():
     # 使用命令行参数直接启动uvicorn
     import sys
     sys.argv = ["uvicorn", "openai_chat_proxy:app", "--host", "0.0.0.0", "--port", "8000",
@@ -652,3 +650,6 @@ if __name__ == "__main__":
                "--loop=uvloop", "--http=httptools", "--limit-concurrency=1000",
                "--backlog=2048", f"--timeout-keep-alive={5}"]
     uvicorn.main()
+
+if __name__ == "__main__":
+    main()
