@@ -1,6 +1,9 @@
 import asyncio
 import os
 from typing import AsyncGenerator, Dict, List, Optional, Union, Any
+import random
+from datetime import datetime
+import platform
 
 import aiohttp
 import orjson
@@ -56,13 +59,98 @@ LOG_REQUESTS = config["log_requests"]
 LOG_RESPONSES = config["log_responses"]
 IP_WHITELIST = config["ip_whitelist"]
 IP_BLACKLIST = config["ip_blacklist"]
-
+DEFAULT_TEMPERATURE = config["default_temperature"]
+DEFAULT_MAX_TOKENS = config["default_max_tokens"]
+DEFAULT_MODEL = config["default_model"]
 # 检查是否启用IP验证
 VALIDATE_IP = bool(IP_WHITELIST or IP_BLACKLIST)
 
 # 聊天完成接口路径
 CHAT_COMPLETION_ROUTE = "/v1/chat/completions"
 
+# 键值映射记录，存储前端key到当前使用的实际key的映射
+CURRENT_KEY_MAPPING = {}
+
+# 添加从sophnet获取匿名token的功能
+async def get_anonymous_token(client_session: aiohttp.ClientSession) -> Optional[str]:
+    """异步获取匿名token
+    
+    Args:
+        client_session: aiohttp会话
+        
+    Returns:
+        str: 获取的token，如果失败则返回None
+    """
+    url = "https://sophnet.com/api/sys/login/anonymous"
+    
+    # 添加随机参数避免缓存
+    if random.random() > 0.7:
+        cachebuster = int(datetime.now().timestamp() * 1000)
+        url = f"{url}?_cb={cachebuster}"
+    
+    # 准备请求头
+    headers = {
+        "User-Agent": f"Mozilla/5.0 ({platform.system()} NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(90, 110)}.0.{random.randint(4000, 5000)}.{random.randint(10, 200)} Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": "https://sophnet.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Pragma": "no-cache",
+        "Cache-Control": "no-cache"
+    }
+    
+    try:
+        async with client_session.get(url, headers=headers, timeout=10) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data["status"] == 0 and "result" in data:
+                    token = data["result"]["anonymousToken"]
+                    return f"anon-{token}"
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.error(f"获取匿名token时出错: {e}")
+        await asyncio.sleep(random.uniform(1, 3))  # 错误后等待
+    
+    return None
+
+# 获取新的API key函数
+async def get_new_api_key(frontend_key: str, client_session: Optional[aiohttp.ClientSession] = None) -> str:
+    """获取新的API key
+    
+    当检测到特定错误码时，获取一个新的API key来替换当前使用的key
+    
+    Args:
+        frontend_key (str): 前端使用的key
+        client_session: aiohttp会话，如果没有提供会创建新的
+        
+    Returns:
+        str: 新的API key
+    """
+    # 动态获取新key
+    logger.info(f"为 {frontend_key} 动态获取新的API key")
+    # 创建一个临时会话或使用提供的会话
+    close_session = False
+    if client_session is None:
+        client_session = aiohttp.ClientSession()
+        close_session = True
+    
+    try:
+        # 尝试获取新token
+        token = await get_anonymous_token(client_session)
+        if token:
+            logger.info(f"成功获取新token: {token[:10]}***")
+            # 如果需要，更新映射
+            CURRENT_KEY_MAPPING[frontend_key] = token
+            return token
+    finally:
+        if close_session:
+            await client_session.close()
+    
+    logger.warning(f"前端key {frontend_key} 没有对应的API key，且无法动态获取")
+    return None
 
 # FastAPI应用
 app = FastAPI(title="openai-chat-proxy", version="0.1.0")
@@ -131,6 +219,8 @@ def apply_field_aliases(data: dict) -> dict:
 class ChatForwarder:
     """OpenAI聊天完成API转发器"""
     
+    MAX_RETRIES = 1  # Max retries (e.g., 1 means 1 original attempt + 1 retry)
+
     def __init__(self, base_url: str, proxy_url_path: str, proxy=None):
         """初始化转发器
         
@@ -144,6 +234,8 @@ class ChatForwarder:
         self.proxy = proxy
         self.client = None
         self.timeout = aiohttp.ClientTimeout(connect=TIMEOUT)
+        # 保存当前请求的前端key，用于在处理响应时切换API key
+        self.current_request_frontend_key = None
     
     async def build_client(self):
         """异步构建HTTP客户端"""
@@ -188,7 +280,7 @@ class ChatForwarder:
             client_host = request.client.host
             return client_host
     
-    def handle_authorization(self, auth_header: str) -> str:
+    async def handle_authorization(self, auth_header: str) -> str:
         """处理授权信息
         
         Args:
@@ -205,11 +297,28 @@ class ChatForwarder:
         bearer_prefix = "Bearer "
         if auth_header.startswith(bearer_prefix):
             key = auth_header[len(bearer_prefix):]
+            self.current_request_frontend_key = key
             
             # 转换前端密钥到实际API密钥
             if key in API_KEYS:
-                actual_key = API_KEYS[key]
+                # 检查是否已经有一个正在使用的key
+                if key in CURRENT_KEY_MAPPING:
+                    actual_key = CURRENT_KEY_MAPPING[key]
+                else:
+                    # 如果没有，获取一个新key
+                    actual_key = await get_new_api_key(key, self.client)
+                    if actual_key is None:
+                        # 如果无法获取新key，回退到原始配置
+                        actual_key = API_KEYS[key]
+                        if isinstance(actual_key, list) and actual_key:
+                            actual_key = actual_key[0]
+                
                 return bearer_prefix + actual_key
+            # 处理特殊的自动获取API key的情况
+            else:
+                # 如果key不在API_KEYS中，也不是sophnet-auto开头，直接返回原始auth_header
+                # 这样可以避免401 key not found错误
+                return auth_header
         
         return auth_header
     
@@ -254,24 +363,52 @@ class ChatForwarder:
             )
     
     async def aiter_bytes(self, response: aiohttp.ClientResponse) -> AsyncGenerator[bytes, Any]:
-        """异步迭代响应中的字节
-        
-        Args:
-            response (aiohttp.ClientResponse): 响应对象
-            
-        Yields:
-            bytes: 响应字节数据
-        """
         try:
+            # This non-streaming path in aiter_bytes should ideally not be hit if reverse_proxy
+            # only passes successful (status 200, text/event-stream) responses to it.
+            if not response.headers.get("content-type", "").startswith("text/event-stream"):
+                content = await response.read()
+                # Log if it's a 40310, but key refresh is handled by reverse_proxy.
+                if response.status == 200 or response.status == 403:
+                    try:
+                        json_content = orjson.loads(content)
+                        if isinstance(json_content, dict) and json_content.get("status") == 40310:
+                             logger.warning(f"aiter_bytes (non-stream): Encountered 40310. Key refresh is handled by reverse_proxy. Message: {json_content.get('message', '未知错误')}")
+                    except Exception: # orjson.JSONDecodeError, etc.
+                        pass # Ignore parsing errors for this logging
+                yield content
+                return
+            
+            # Expected path: Processing a live, successful stream
             async for chunk in response.content.iter_any():
                 if LOG_RESPONSES:
                     try:
                         logger.debug(f"响应数据: {chunk.decode('utf-8')}")
-                    except:
-                        pass
+                    except UnicodeDecodeError:
+                        logger.debug(f"响应数据 (bytes): {chunk}")
+                
+                # Optional: Log if 40310 appears mid-stream (no retry from here)
+                try:
+                    chunk_str = chunk.decode('utf-8')
+                    data_prefix = "data: "
+                    if chunk_str.startswith(data_prefix): # Check if it's an SSE data line
+                        json_part = chunk_str[len(data_prefix):].strip()
+                        if json_part and json_part != "[DONE]": # Ensure there's content and it's not the end signal
+                            try:
+                                parsed_json = orjson.loads(json_part)
+                                if isinstance(parsed_json, dict) and parsed_json.get("status") == 40310:
+                                    logger.warning(f"aiter_bytes (stream): Detected 40310 mid-stream. Message: {parsed_json.get('message', 'N/A')}. This occurrence will not trigger a retry.")
+                            except orjson.JSONDecodeError:
+                                pass # Not a valid JSON object after "data: "
+                except UnicodeDecodeError:
+                    pass # Chunk not UTF-8, cannot be our specific JSON error format
+                except Exception as e: 
+                    logger.error(f"Error during mid-stream 40310 check: {e}")
+                    
                 yield chunk
         except Exception as e:
-            logger.error(f"流式响应处理错误: {str(e)}")
+            logger.error(f"Error in aiter_bytes response processing: {str(e)}")
+            raise # Re-raise to ensure stream termination if error is critical
     
     async def prepare_request_info(self, request: Request) -> dict:
         """准备请求信息
@@ -291,7 +428,10 @@ class ChatForwarder:
         # 处理授权
         auth_header = headers.get("authorization")
         if auth_header:
-            headers["authorization"] = self.handle_authorization(auth_header)
+            headers["authorization"] = await self.handle_authorization(auth_header)
+            
+        headers["Accept"] = "*/*"
+        # headers["Accept-Encoding"] = "gzip, deflate, br"
         
         # 移除不需要转发的头信息
         headers_to_remove = ['host', 'content-length']
@@ -314,26 +454,27 @@ class ChatForwarder:
         Returns:
             StreamingResponse: 流式响应
         """
-        # 验证IP
         client_ip = self.get_client_ip(request)
         self.validate_request_ip(client_ip)
         
-        # 获取请求体数据
         original_data = await request.body()
+        data: Optional[bytes] = None # Declare data here to be used in loop
         
-        # 应用字段别名映射（如果有）
+        if LOG_REQUESTS and original_data:
+            try:
+                logger.info(f"CLIENT -> PROXY (raw body decoded): {original_data.decode('utf-8')}")
+            except UnicodeDecodeError:
+                logger.info(f"CLIENT -> PROXY (raw body bytes): {original_data!r}")
+
         if original_data and FIELD_ALIASES:
             try:
-                # 解析请求体为JSON
                 payload_dict = orjson.loads(original_data)
-                
-                # 应用字段别名映射
+                # 手动添加temperature字段
+                payload_dict["model"] = DEFAULT_MODEL
+                payload_dict["temperature"] = DEFAULT_TEMPERATURE 
+                payload_dict["max_tokens"] = DEFAULT_MAX_TOKENS
                 transformed_dict = apply_field_aliases(payload_dict)
-                
-                # 转换回bytes
                 data = orjson.dumps(transformed_dict)
-                
-                # 日志记录
                 if LOG_REQUESTS:
                     logger.info(f"原始请求数据: {payload_dict}")
                     logger.info(f"转换后请求数据: {transformed_dict}")
@@ -344,29 +485,93 @@ class ChatForwarder:
             data = original_data
             if data and LOG_REQUESTS:
                 try:
-                    payload = orjson.loads(data)
-                    logger.info(f"请求数据: {payload}")
+                    logger.info(f"请求数据: {orjson.loads(data)}")
                 except:
                     logger.info(f"请求数据: [无法解析JSON]")
-        
-        # 准备请求信息
-        request_info = await self.prepare_request_info(request)
-        
-        # 发送请求到目标服务器
-        response = await self.send_request(
-            method=request_info["method"],
-            url=request_info["url"],
-            headers=request_info["headers"],
-            data=data
-        )
-        
-        # 返回流式响应
-        return StreamingResponse(
-            self.aiter_bytes(response),
-            status_code=response.status,
-            media_type=response.headers.get("content-type"),
-            background=BackgroundTask(response.release),
-        )
+
+        # Log the final data payload that will be sent to the backend
+        if LOG_REQUESTS and data:
+            try:
+                logger.info(f"PROXY -> BACKEND (final body decoded): {data.decode('utf-8')}")
+            except UnicodeDecodeError:
+                logger.info(f"PROXY -> BACKEND (final body bytes): {data!r}")
+
+        final_response_to_send = None
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            self.current_request_frontend_key = None # Reset for each attempt
+
+            request_info = await self.prepare_request_info(request)
+            
+            auth_header_for_log = request_info["headers"].get("authorization", "None")
+            logger.info(f"Attempt {attempt + 1}/{self.MAX_RETRIES + 1} using Authorization: {auth_header_for_log[:25]}...")
+
+            target_response = await self.send_request(
+                method=request_info["method"],
+                url=request_info["url"],
+                headers=request_info["headers"],
+                data=data
+            )
+
+            if target_response.status == 200 and \
+               target_response.headers.get("content-type", "").startswith("text/event-stream"):
+                logger.info(f"Attempt {attempt + 1}: Successful stream response (status {target_response.status}). Forwarding.")
+                return StreamingResponse(
+                    self.aiter_bytes(target_response),
+                    status_code=target_response.status,
+                    media_type=target_response.headers.get("content-type"),
+                    background=BackgroundTask(target_response.release),
+                )
+
+            response_content = await target_response.read()
+            
+            is_40310_error = False
+            if target_response.status == 200 or target_response.status == 403:
+                try:
+                    json_body = orjson.loads(response_content)
+                    if isinstance(json_body, dict) and json_body.get("status") == 40310:
+                        is_40310_error = True
+                        logger.warning(
+                            f"Attempt {attempt + 1}: Detected status 40310. Message: {json_body.get('message', 'N/A')}"
+                        )
+                except orjson.JSONDecodeError:
+                    pass 
+            
+            if is_40310_error:
+                if self.current_request_frontend_key:
+                    logger.info(f"Attempting to get a new API key for frontend key: {self.current_request_frontend_key}")
+                    new_key_token_str = await get_new_api_key(self.current_request_frontend_key, self.client)
+                    
+                    if new_key_token_str:
+                        await target_response.release()
+                        if attempt < self.MAX_RETRIES:
+                            logger.info(f"New key obtained. Retrying request (next attempt: {attempt + 2}).")
+                            await asyncio.sleep(random.uniform(0.5, 1.5)) # Small delay before retry
+                            continue
+                        else:
+                            logger.warning(f"New key obtained, but max retries ({self.MAX_RETRIES + 1}) reached. Failing with last error.")
+                    else:
+                        logger.warning("Failed to obtain a new API key. Will not retry based on this error.")
+                else:
+                    logger.warning("40310 error detected, but no current_request_frontend_key was set. Cannot refresh key.")
+
+            logger.info(f"Attempt {attempt + 1}: Forwarding this response (status: {target_response.status}). No further retries for this error type or max attempts reached.")
+            
+            async def _final_content_streamer(content_bytes, original_resp_to_release):
+                try:
+                    yield content_bytes
+                finally:
+                    if original_resp_to_release:
+                        await original_resp_to_release.release()
+
+            final_response_to_send = StreamingResponse(
+                _final_content_streamer(response_content, target_response),
+                status_code=target_response.status,
+                media_type=target_response.headers.get("content-type"),
+            )
+            break 
+
+        return final_response_to_send
 
 # 创建转发器，传入自定义转发路径
 forwarder = ChatForwarder(BASE_URL, PROXY_URL_PATH, PROXY)
@@ -383,6 +588,12 @@ async def startup():
     if PROXY:
         logger.info(f"使用代理: {PROXY}")
     logger.info(f"监听路径: {ROUTE_PREFIX}{CHAT_COMPLETION_ROUTE}")
+    
+    # 初始化所有API keys映射
+    for frontend_key, actual_keys in API_KEYS.items():
+        if isinstance(actual_keys, list) and actual_keys:
+            CURRENT_KEY_MAPPING[frontend_key] = actual_keys[0]
+            logger.info(f"初始化API key映射: {frontend_key} -> {actual_keys[0][:5]}***")
 
 @app.on_event("shutdown")
 async def shutdown():
