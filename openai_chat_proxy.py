@@ -4,6 +4,7 @@ import random
 from datetime import datetime
 import platform
 import multiprocessing
+import time
 
 import aiohttp
 import orjson
@@ -11,7 +12,7 @@ import uvicorn
 from fastapi import FastAPI, Request, HTTPException, status
 from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from loguru import logger
 import yaml
@@ -91,6 +92,15 @@ VALIDATE_IP = bool(IP_WHITELIST or IP_BLACKLIST)
 
 # 聊天完成接口路径
 CHAT_COMPLETION_ROUTE = "/v1/chat/completions"
+
+# 添加模型接口常量
+MODELS_ROUTE = "/v1/models"
+SOPHNET_MODELS_API = "https://www.sophnet.com/api/public/playground/models?projectUuid=Ar79PWUQUAhjJOja2orHs"
+MODELS_CACHE_TTL = 300  # 缓存模型列表的时间（秒）
+
+# 添加模型缓存和最后更新时间
+models_cache = None
+models_last_updated = 0
 
 # 键值映射记录，存储前端key到当前使用的实际key的映射
 CURRENT_KEY_MAPPING = {}
@@ -641,6 +651,132 @@ app.add_route(
     forwarder.reverse_proxy,
     methods=["POST"],
 )
+
+# 在ChatForwarder类中添加获取模型列表的方法
+async def fetch_models():
+    """从sophnet获取模型列表并转换为OpenAI格式
+    
+    Returns:
+        dict: OpenAI格式的模型列表
+    """
+    global models_cache, models_last_updated
+    
+    # 检查缓存是否有效
+    current_time = time.time()
+    if models_cache and current_time - models_last_updated < MODELS_CACHE_TTL:
+        return models_cache
+    
+    try:
+        # 创建一个连接器和会话
+        connector = aiohttp.TCPConnector(limit=5)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # 直接获取匿名token
+            token = await get_anonymous_token(session)
+            if not token:
+                logger.warning("无法获取匿名token，模型列表请求可能会失败")
+                # 如果仍有缓存，返回缓存
+                if models_cache:
+                    return models_cache
+                return {"object": "list", "data": []}
+            
+            # 准备请求头
+            headers = {
+                "User-Agent": f"Mozilla/5.0 ({platform.system()} NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(90, 110)}.0.{random.randint(4000, 5000)}.{random.randint(10, 200)} Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+                "Referer": "https://sophnet.com/",
+            }
+            
+            # 设置匿名token头
+            headers["Authorization"] = f"Bearer {token}"
+            
+            logger.debug(f"获取模型列表使用的匿名token: {headers['Authorization']}...")
+            
+            # 发送请求获取模型列表
+            async with session.get(SOPHNET_MODELS_API, headers=headers) as response:
+                if response.status != 200:
+                    logger.error(f"获取模型列表失败: {response.status}")
+                    if models_cache:  # 如果有缓存，返回缓存
+                        return models_cache
+                    return {"object": "list", "data": []}
+                
+                sophnet_data = await response.json()
+                
+                if sophnet_data.get("status") != 0 or "result" not in sophnet_data:
+                    logger.error(f"sophnet API返回错误: {sophnet_data.get('message', '未知错误')}")
+                    if models_cache:
+                        return models_cache
+                    return {"object": "list", "data": []}
+                
+                # 转换为OpenAI格式
+                current_timestamp = int(datetime.now().timestamp() * 1000)
+                openai_models = {
+                    "object": "list",
+                    "data": []
+                }
+                
+                for model in sophnet_data["result"]:
+                    model_id = model.get("modelFamily") or model.get("displayName")
+                    if not model_id:
+                        continue
+                        
+                    # 创建OpenAI格式的模型数据
+                    openai_model = {
+                        "id": model_id,
+                        "object": "model",
+                        "created": current_timestamp,
+                        "owned_by": "sophnet",
+                        "permission": [
+                            {
+                                "id": f"modelperm-{model.get('id', random.randint(1, 100))}",
+                                "object": "model_permission",
+                                "created": current_timestamp,
+                                "allow_create_engine": False,
+                                "allow_sampling": True,
+                                "allow_logprobs": False,
+                                "allow_search_indices": False,
+                                "allow_view": True,
+                                "allow_fine_tuning": False,
+                                "organization": "*",
+                                "group": None,
+                                "is_blocking": False
+                            }
+                        ],
+                        "root": model_id,
+                        "parent": None
+                    }
+                    openai_models["data"].append(openai_model)
+                
+                # 更新缓存和时间戳
+                models_cache = openai_models
+                models_last_updated = current_time
+                
+                return openai_models
+    except Exception as e:
+        logger.error(f"获取模型列表时出错: {e}")
+        if models_cache:
+            return models_cache
+        return {"object": "list", "data": []}
+
+# 添加模型列表处理函数
+@app.get(MODELS_ROUTE)
+async def list_models(request: Request):
+    """获取可用的模型列表
+    
+    Args:
+        request (Request): FastAPI请求对象
+        
+    Returns:
+        JSONResponse: 模型列表
+    """
+    client_ip = forwarder.get_client_ip(request)
+    forwarder.validate_request_ip(client_ip)
+    
+    # 获取模型列表，总是使用匿名token
+    models = await fetch_models()
+    
+    # 返回JSON响应
+    return JSONResponse(content=models)
 
 def main():
     # 使用命令行参数直接启动uvicorn
