@@ -10,8 +10,7 @@ timeout: 30
 base_url: "https://sophnet.com"
 
 # 代理服务器URL(如果需要)
-# 示例: http://127.0.0.1:7890
-proxy: null
+# 示例: http://127.0.0.1:7890 推荐使用socks5
 
 # 自定义转发目标路径
 # 接收的请求路径始终为 /v1/chat/completions
@@ -54,20 +53,18 @@ ip_blacklist:
   # - "10.0.0.1"
 
 # 日志设置
-# 是否记录请求数据
-log_requests: false
-# 是否记录响应数据
-log_responses: false
+# 日志级别控制所有日志输出
+# DEBUG - 显示所有日志，包括请求和响应内容
+# INFO - 显示信息性日志，但不包含请求和响应详情
+# WARNING - 只显示警告和错误
+# ERROR - 只显示错误
+log_level: "INFO"                    # 日志级别: DEBUG, INFO, WARNING, ERROR
 
 # HTTP连接池配置
 connection_limit: 1000               # HTTP连接池连接数上限
 connection_limit_per_host: 100       # 每个主机的连接数上限
-keepalive_timeout: 60                # 连接保持活跃时间(秒)
+keepalive_timeout: -1                # 连接保持活跃时间(秒)
+force_close: true                   # 是否强制关闭连接，当代理是轮询IP时，启用以减少429 too many requests错误
 
 # 进程与性能配置
 workers: null                        # 工作进程数，null表示使用CPU核心数
-log_level: "INFO"                    # 日志级别: DEBUG, INFO, WARNING, ERROR
-
-# Function Call功能配置
-enable_function_call: true           # 是否启用函数调用功能
-function_call_timeout: 60            # 函数调用超时时间(秒) 
