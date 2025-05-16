@@ -345,10 +345,8 @@ class ChatForwarder:
     
     def validate_request_ip(self, ip: str):
         """验证请求IP是否允许访问
-        
         Args:
             ip (str): 客户端IP地址
-            
         Raises:
             HTTPException: 如果IP不在白名单内或在黑名单内，抛出403错误
         """
@@ -362,10 +360,8 @@ class ChatForwarder:
     
     def get_client_ip(self, request: Request) -> str:
         """从请求中获取客户端IP地址
-        
         Args:
             request (Request): FastAPI请求对象
-            
         Returns:
             str: 客户端IP地址
         """
@@ -386,13 +382,6 @@ class ChatForwarder:
         Returns:
             str: 处理后的授权头部信息
         """
-        """
-        if not auth_header:
-            logger.warning("没有提供授权信息")
-            return auth_header
-            
-        # 假设auth_header格式为"Bearer YOUR_API_KEY"
-        """        
         if not auth_header:
             logger.warning("没有提供授权信息")
             return auth_header
@@ -473,14 +462,6 @@ class ChatForwarder:
             # only passes successful (status 200, text/event-stream) responses to it.
             if not response.headers.get("content-type", "").startswith("text/event-stream"):
                 content = await response.read()
-                # Log if it's a 40310, but key refresh is handled by reverse_proxy.
-                if response.status == 200 or response.status == 403:
-                    try:
-                        json_content = orjson.loads(content)
-                        if isinstance(json_content, dict) and json_content.get("status") == 40310:
-                             logger.warning(f"aiter_bytes (non-stream): Encountered 40310. Key refresh is handled by reverse_proxy. Message: {json_content.get('message', '未知错误')}")
-                    except Exception:
-                        pass # Ignore parsing errors for this logging
                 yield content
                 return
             
@@ -488,12 +469,6 @@ class ChatForwarder:
             buffer_size = 64 * 1024  # 64KB
             # Expected path: Processing a live, successful stream
             async for chunk in response.content.iter_chunked(buffer_size):
-                # # 使用DEBUG级别记录响应数据
-                # try:
-                #     logger.debug(f"响应数据: {chunk.decode('utf-8')}")
-                # except UnicodeDecodeError:
-                #     logger.debug(f"响应数据 (bytes): {chunk}")
-                  
                 yield chunk
         except Exception as e:
             logger.error(f"Error in aiter_bytes response processing: {str(e)}")
@@ -553,12 +528,6 @@ class ChatForwarder:
         original_data = await request.body()
         data: Optional[bytes] = None # Declare data here to be used in loop
         
-        # 使用DEBUG级别记录请求原始数据
-        # if original_data:
-        #     try:
-        #         logger.debug(f"CLIENT -> PROXY (raw body decoded): {original_data.decode('utf-8')}")
-        #     except UnicodeDecodeError:
-        #         logger.debug(f"CLIENT -> PROXY (raw body bytes): {original_data!r}")
 
         if original_data:
             try:
@@ -575,9 +544,6 @@ class ChatForwarder:
                 # 应用字段别名
                 if FIELD_ALIASES:
                     transformed_dict = apply_field_aliases(payload_dict)
-                    # 记录转换前后的数据
-                    # logger.debug(f"原始请求数据: {payload_dict}")
-                    # logger.debug(f"转换后请求数据: {transformed_dict}")
                     payload_dict = transformed_dict
                 
                 # 序列化回bytes
@@ -709,36 +675,7 @@ class ChatForwarder:
 
             response_content = await target_response.read()
             
-            is_40310_error = False
-            if target_response.status == 200 or target_response.status == 403:
-                try:
-                    json_body = orjson.loads(response_content)
-                    if isinstance(json_body, dict) and json_body.get("status") == 40310:
-                        is_40310_error = True
-                        logger.warning(
-                            f"Attempt {attempt + 1}: Detected status 40310. Message: {json_body.get('message', 'N/A')}"
-                        )
-                except orjson.JSONDecodeError:
-                    pass 
             
-            if is_40310_error:
-                if self.current_request_frontend_key:
-                    logger.info(f"Attempting to get a new API key for frontend key: {self.current_request_frontend_key}")
-                    new_key_token_str = await get_new_api_key(self.current_request_frontend_key, self.client)
-                    
-                    if new_key_token_str:
-                        await target_response.release()
-                        if attempt < self.MAX_RETRIES:
-                            logger.info(f"New key obtained. Retrying request (next attempt: {attempt + 2}).")
-                            await asyncio.sleep(random.uniform(0.3, 0.7)) # 减少重试间隔
-                            continue
-                        else:
-                            logger.warning(f"New key obtained, but max retries ({self.MAX_RETRIES + 1}) reached. Failing with last error.")
-                    else:
-                        logger.warning("Failed to obtain a new API key. Will not retry based on this error.")
-                else:
-                    logger.warning("40310 error detected, but no current_request_frontend_key was set. Cannot refresh key.")
-
             logger.debug(f"Attempt {attempt + 1}: Forwarding this response (status: {target_response.status}). No further retries for this error type or max attempts reached.")
             
             
