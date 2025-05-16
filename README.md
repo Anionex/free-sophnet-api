@@ -20,6 +20,7 @@
 - 支持 HTTP 代理
 - 健康检查 API
 - 支持获取模型列表
+- 该接口也支持function call/tool call功能
 
 ## 快速开始
 
@@ -132,89 +133,6 @@ curl -X POST http://localhost:8000/v1/chat/completions `
   }'
 ```
 
-### Function Call 功能
-
-服务支持 OpenAI 兼容的 Function Call 和 Tools 接口格式，可以让模型调用外部函数或执行特定任务。
-
-#### 请求示例 (Function Call)
-
-```powershell
-curl -X POST http://localhost:8000/v1/chat/completions `
-  -H "Content-Type: application/json" `
-  -H "Authorization: Bearer your_frontend_key" `
-  -d '{
-    "model": "DeepSeek-V3-Fast",
-    "messages": [{"role": "user", "content": "明天北京的天气如何？"}],
-    "functions": [
-      {
-        "name": "get_weather",
-        "description": "获取指定地区的天气预报",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {
-              "type": "string",
-              "description": "城市名称，例如：北京"
-            },
-            "date": {
-              "type": "string",
-              "description": "日期，例如：2023-05-01"
-            }
-          },
-          "required": ["location"]
-        }
-      }
-    ],
-    "function_call": "auto"
-  }'
-```
-
-#### 请求示例 (Tools)
-
-```powershell
-curl -X POST http://localhost:8000/v1/chat/completions `
-  -H "Content-Type: application/json" `
-  -H "Authorization: Bearer your_frontend_key" `
-  -d '{
-    "model": "DeepSeek-V3-Fast",
-    "messages": [{"role": "user", "content": "明天北京的天气如何？"}],
-    "tools": [
-      {
-        "type": "function",
-        "function": {
-          "name": "get_weather",
-          "description": "获取指定地区的天气预报",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "location": {
-                "type": "string",
-                "description": "城市名称，例如：北京"
-              },
-              "date": {
-                "type": "string",
-                "description": "日期，例如：2023-05-01"
-              }
-            },
-            "required": ["location"]
-          }
-        }
-      }
-    ],
-    "tool_choice": "auto"
-  }'
-```
-
-#### 配置 Function Call
-
-在 `config.yml` 中配置 Function Call 功能：
-
-```yaml
-# Function Call功能配置
-enable_function_call: true           # 是否启用函数调用功能
-function_call_timeout: 60            # 函数调用超时时间(秒)
-```
-
 ## 依赖库
 
 需要安装以下 Python 依赖：
@@ -244,3 +162,43 @@ http://localhost:8000/health
 ```
 http://localhost:8000/v1/models
 ```
+
+
+## 如何获得更好的性能？
+
+研究发现性能瓶颈在于官网对/chat/completions接口的rate limit。因此解决方案是使用代理池发出请求以尽量减少被限制的次数。
+
+在config.yml中配置代理：
+```
+# 代理服务器URL(如果需要)
+# 示例: socks5://127.0.0.1:7890 推荐使用socks5
+```
+
+同时，在config.yml中设置参数：
+```
+keepalive_timeout: 0
+force close: true
+```
+
+当配置了proxy，脚本会自动将请求头中的x-real-ip等字段统一设置为当前发起请求的IP地址。虽然实测没有太多差别；
+
+压测命令：
+```
+evalscope perf \
+    --url "http://127.0.0.1:8000/v1/chat/completions" \
+    --parallel 16 \
+    --model "DeepSeek-V3-Fast" \
+    --number 100 \
+    --api openai \
+     --api-key "sk-2jc7k79eca#" \
+    --dataset openqa \
+    --stream
+```
+
+优化前：
+![优化前](./assets/baseline.png)
+
+使用上述优化后效果：
+![优化后](./assets/after_optimize.png)
+
+如果有更好的方法，欢迎交流！
