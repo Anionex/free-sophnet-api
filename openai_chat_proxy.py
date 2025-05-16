@@ -31,15 +31,15 @@ DEFAULT_CONFIG = {
         # 例如: "model": "model_id"
     },
     "api_keys": {},
-    "log_requests": False,
-    "log_responses": False,
     "ip_whitelist": [],
     "ip_blacklist": [],
     "connection_limit": 1000,               # 新增: HTTP连接池连接数上限
     "connection_limit_per_host": 100,       # 新增: 每个主机的连接数上限
     "keepalive_timeout": 60,                # 新增: 连接保持活跃时间(秒)
     "workers": None,                        # 新增: 工作进程数，默认为CPU核心数
-    "log_level": "INFO"                     # 新增: 日志级别
+    "log_level": "INFO",                    # 新增: 日志级别
+    "enable_function_call": True,           # 新增: 是否启用函数调用功能
+    "function_call_timeout": 60             # 新增: 函数调用超时时间(秒)
 }
 
 # 加载配置文件
@@ -62,8 +62,6 @@ PROXY = config["proxy"]
 PROXY_URL_PATH = config["proxy_url_path"]
 FIELD_ALIASES = config["field_aliases"]
 API_KEYS = config["api_keys"]
-LOG_REQUESTS = config["log_requests"]
-LOG_RESPONSES = config["log_responses"]
 IP_WHITELIST = config["ip_whitelist"]
 IP_BLACKLIST = config["ip_blacklist"]
 DEFAULT_TEMPERATURE = config.get("default_temperature", 1.0)
@@ -75,6 +73,8 @@ CONNECTION_LIMIT_PER_HOST = config["connection_limit_per_host"]
 KEEPALIVE_TIMEOUT = config["keepalive_timeout"]
 WORKERS = config["workers"] or multiprocessing.cpu_count()
 LOG_LEVEL = config["log_level"]
+ENABLE_FUNCTION_CALL = config.get("enable_function_call", True)
+FUNCTION_CALL_TIMEOUT = config.get("function_call_timeout", 60)
 
 # 设置日志级别
 logger.remove()
@@ -226,13 +226,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 消息模型
+# Function Call 相关模型
+class FunctionDefinition(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    
+class ToolFunction(BaseModel):
+    function: FunctionDefinition
+
+class Tool(BaseModel):
+    type: str = "function"
+    function: FunctionDefinition
+
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str
+
+# 聊天完成请求模型
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
     name: Optional[str] = None
+    function_call: Optional[FunctionCall] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
     
-# 聊天完成请求模型
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
@@ -246,6 +264,10 @@ class ChatCompletionRequest(BaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    functions: Optional[List[FunctionDefinition]] = None
+    function_call: Optional[Union[str, Dict[str, str]]] = None
+    tools: Optional[List[Tool]] = None
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None
 
 def apply_field_aliases(data: dict) -> dict:
     """应用字段别名映射规则，转换字段名称
@@ -459,11 +481,11 @@ class ChatForwarder:
             buffer_size = 64 * 1024  # 64KB
             # Expected path: Processing a live, successful stream
             async for chunk in response.content.iter_chunked(buffer_size):
-                if LOG_RESPONSES and logger.level <= 10:  # 只在DEBUG级别记录详细响应
-                    try:
-                        logger.debug(f"响应数据: {chunk.decode('utf-8')}")
-                    except UnicodeDecodeError:
-                        logger.debug(f"响应数据 (bytes): {chunk}")
+                # # 使用DEBUG级别记录响应数据
+                # try:
+                #     logger.debug(f"响应数据: {chunk.decode('utf-8')}")
+                # except UnicodeDecodeError:
+                #     logger.debug(f"响应数据 (bytes): {chunk}")
                   
                 yield chunk
         except Exception as e:
@@ -520,15 +542,28 @@ class ChatForwarder:
         original_data = await request.body()
         data: Optional[bytes] = None # Declare data here to be used in loop
         
-        if LOG_REQUESTS and original_data:
-            try:
-                logger.debug(f"CLIENT -> PROXY (raw body decoded): {original_data.decode('utf-8')}")
-            except UnicodeDecodeError:
-                logger.debug(f"CLIENT -> PROXY (raw body bytes): {original_data!r}")
+        # 使用DEBUG级别记录请求原始数据
+        # if original_data:
+        #     try:
+        #         logger.debug(f"CLIENT -> PROXY (raw body decoded): {original_data.decode('utf-8')}")
+        #     except UnicodeDecodeError:
+        #         logger.debug(f"CLIENT -> PROXY (raw body bytes): {original_data!r}")
 
-        if original_data and FIELD_ALIASES:
+        if original_data:
             try:
                 payload_dict = orjson.loads(original_data)
+                
+                # 检查是否包含function call相关字段
+                has_function_fields = False
+                if ENABLE_FUNCTION_CALL and (
+                    'functions' in payload_dict or 
+                    'function_call' in payload_dict or
+                    'tools' in payload_dict or
+                    'tool_choice' in payload_dict
+                ):
+                    has_function_fields = True
+                    logger.debug("检测到function call/tools请求")
+                
                 # 如果未设置模型和参数，添加默认值
                 if "model" not in payload_dict:
                     payload_dict["model"] = DEFAULT_MODEL
@@ -536,24 +571,25 @@ class ChatForwarder:
                     payload_dict["temperature"] = DEFAULT_TEMPERATURE 
                 if "max_tokens" not in payload_dict:
                     payload_dict["max_tokens"] = DEFAULT_MAX_TOKENS
-                transformed_dict = apply_field_aliases(payload_dict)
-                data = orjson.dumps(transformed_dict)
-                if LOG_REQUESTS:
-                    logger.debug(f"原始请求数据: {payload_dict}")
-                    logger.debug(f"转换后请求数据: {transformed_dict}")
+                
+                # 应用字段别名
+                if FIELD_ALIASES:
+                    transformed_dict = apply_field_aliases(payload_dict)
+                    # 记录转换前后的数据
+                    # logger.debug(f"原始请求数据: {payload_dict}")
+                    # logger.debug(f"转换后请求数据: {transformed_dict}")
+                    payload_dict = transformed_dict
+                
+                # 序列化回bytes
+                data = orjson.dumps(payload_dict)
             except Exception as e:
                 logger.error(f"处理请求数据时出错: {e}")
                 data = original_data
         else:
             data = original_data
-            if data and LOG_REQUESTS:
-                try:
-                    logger.debug(f"请求数据: {orjson.loads(data)}")
-                except:
-                    logger.debug(f"请求数据: [无法解析JSON]")
 
-        # Log the final data payload that will be sent to the backend
-        if LOG_REQUESTS and data:
+        # 记录最终发送到后端的数据
+        if data:
             try:
                 logger.debug(f"PROXY -> BACKEND (final body decoded): {data.decode('utf-8')}")
             except UnicodeDecodeError:
@@ -567,8 +603,7 @@ class ChatForwarder:
             request_info = await self.prepare_request_info(request)
             
             auth_header_for_log = request_info["headers"].get("authorization", "None")
-            if LOG_REQUESTS:
-                logger.debug(f"Attempt {attempt + 1}/{self.MAX_RETRIES + 1} using Authorization: {auth_header_for_log[:25]}...")
+            logger.debug(f"Attempt {attempt + 1}/{self.MAX_RETRIES + 1} using Authorization: {auth_header_for_log[:25]}...")
 
             target_response = await self.send_request(
                 method=request_info["method"],
@@ -588,6 +623,20 @@ class ChatForwarder:
                 )
 
             response_content = await target_response.read()
+            
+            # 检查是否包含function call响应并记录日志
+            if target_response.status == 200:
+                try:
+                    json_content = orjson.loads(response_content)
+                    if isinstance(json_content, dict):
+                        if json_content.get("choices") and isinstance(json_content["choices"], list):
+                            for choice in json_content["choices"]:
+                                if isinstance(choice, dict):
+                                    message = choice.get("message", {})
+                                    if message.get("function_call") or message.get("tool_calls"):
+                                        logger.debug(f"检测到function call/tools响应: {message}")
+                except Exception as e:
+                    logger.debug(f"解析响应以检查function call时出错: {e}")
             
             is_40310_error = False
             if target_response.status == 200 or target_response.status == 403:

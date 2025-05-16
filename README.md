@@ -13,6 +13,7 @@
 - 支持自动获取 SophNet 匿名 token
 - 支持自定义转发目标路径
 - 支持请求字段别名映射（如 model 到 model_id）
+- 支持 OpenAI Function Calling 与 Tools 功能
 - API 密钥映射，便于管理和保护实际 API 密钥
 - IP 白名单/黑名单访问控制
 - 可配置的请求和响应日志记录
@@ -129,6 +130,89 @@ curl -X POST http://localhost:8000/v1/chat/completions `
     "messages": [{"role": "user", "content": "你好"}],
     "stream": true
   }'
+```
+
+### Function Call 功能
+
+服务支持 OpenAI 兼容的 Function Call 和 Tools 接口格式，可以让模型调用外部函数或执行特定任务。
+
+#### 请求示例 (Function Call)
+
+```powershell
+curl -X POST http://localhost:8000/v1/chat/completions `
+  -H "Content-Type: application/json" `
+  -H "Authorization: Bearer your_frontend_key" `
+  -d '{
+    "model": "DeepSeek-V3-Fast",
+    "messages": [{"role": "user", "content": "明天北京的天气如何？"}],
+    "functions": [
+      {
+        "name": "get_weather",
+        "description": "获取指定地区的天气预报",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "城市名称，例如：北京"
+            },
+            "date": {
+              "type": "string",
+              "description": "日期，例如：2023-05-01"
+            }
+          },
+          "required": ["location"]
+        }
+      }
+    ],
+    "function_call": "auto"
+  }'
+```
+
+#### 请求示例 (Tools)
+
+```powershell
+curl -X POST http://localhost:8000/v1/chat/completions `
+  -H "Content-Type: application/json" `
+  -H "Authorization: Bearer your_frontend_key" `
+  -d '{
+    "model": "DeepSeek-V3-Fast",
+    "messages": [{"role": "user", "content": "明天北京的天气如何？"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "获取指定地区的天气预报",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string",
+                "description": "城市名称，例如：北京"
+              },
+              "date": {
+                "type": "string",
+                "description": "日期，例如：2023-05-01"
+              }
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }'
+```
+
+#### 配置 Function Call
+
+在 `config.yml` 中配置 Function Call 功能：
+
+```yaml
+# Function Call功能配置
+enable_function_call: true           # 是否启用函数调用功能
+function_call_timeout: 60            # 函数调用超时时间(秒)
 ```
 
 ## 依赖库

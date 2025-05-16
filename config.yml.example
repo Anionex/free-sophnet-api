@@ -57,4 +57,17 @@ ip_blacklist:
 # 是否记录请求数据
 log_requests: false
 # 是否记录响应数据
-log_responses: false 
+log_responses: false
+
+# HTTP连接池配置
+connection_limit: 1000               # HTTP连接池连接数上限
+connection_limit_per_host: 100       # 每个主机的连接数上限
+keepalive_timeout: 60                # 连接保持活跃时间(秒)
+
+# 进程与性能配置
+workers: null                        # 工作进程数，null表示使用CPU核心数
+log_level: "INFO"                    # 日志级别: DEBUG, INFO, WARNING, ERROR
+
+# Function Call功能配置
+enable_function_call: true           # 是否启用函数调用功能
+function_call_timeout: 60            # 函数调用超时时间(秒) 
