@@ -1,4 +1,3 @@
-from functools import cache
 import sys
 import pprint
 from loguru import logger
@@ -6,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 import yaml
 import os
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from const import LOG_PATH
 
 
@@ -62,7 +61,7 @@ class Config(BaseModel):
     转发目标的路径, 比如 openai `https://api.openai.com/v1/chat/completions` 则为 `/v1/chat/completions`
     """
 
-    field_aliases: dict[str, str] = {}
+    field_aliases: dict[str, str] = Field(default_factory=dict)
     """
     请求字段映射: 接收请求字段名->转发请求字段名
 
@@ -70,17 +69,17 @@ class Config(BaseModel):
         - {"model": "model_id"}: 将请求接收到的字段 {"model": "xxx"} 转换为 {"model_id": "xxx"}, 然后向上游发送请求
     """
 
-    api_keys: dict[str, str] = {}
+    api_keys: dict[str, str] = Field(default_factory=dict)
     """
     API 密钥映射: 接收请求 API KEY -> 转发请求 API KEY (上游 API KEY)
     """
 
-    ip_whitelist: list[str] = []
+    ip_whitelist: list[str] | None = None
     """
     接收请求 IP 白名单
     """
 
-    ip_black_list: list[str] = []
+    ip_black_list: list[str] | None = None
     """
     接收请求 IP 黑名单
 
@@ -146,13 +145,16 @@ class Config(BaseModel):
         return bool(self.ip_whitelist or self.ip_black_list)
 
 
-_build_logger()
-
 logger.info("Loading config...")
 with open("config.yml", "r", encoding="utf-8") as f:
+    cfg_obj = Config()
     try:
         cfg_obj = Config.model_validate(yaml.safe_load(f), strict=True)
+        if cfg_obj.workers is None:
+            cfg_obj.workers = os.cpu_count()
     except IOError:
-        cfg_obj = Config()
+        logger.warning("No config file, use default values.")
     # YAMLError and pydantic errors will panic
-logger.info("Config loaded:\n%s", pprint.pformat(cfg_obj))
+logger.info(f"Config loaded:\n{pprint.pformat(cfg_obj.model_dump())}")
+
+_build_logger()
