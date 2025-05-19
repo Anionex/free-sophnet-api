@@ -3,3 +3,4 @@ openai-chat-proxy-config.yaml
 /config.yml
 *.log
 __pycache__
+.pytest_cache
