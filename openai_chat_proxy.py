@@ -2,10 +2,8 @@ import asyncio
 from typing import AsyncGenerator, Dict, List, Optional, Union, Any
 import random
 from datetime import datetime
-import platform
 import multiprocessing
 import time
-import socket
 
 import aiohttp
 import orjson
@@ -14,13 +12,13 @@ from fastapi import FastAPI, Request, HTTPException, status
 from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from loguru import logger
 import yaml
 from pathlib import Path
 from contextlib import asynccontextmanager
 from aiohttp_socks import ProxyConnector
-
+from fake_useragent import FakeUserAgent
 
 
 
@@ -110,6 +108,10 @@ models_last_updated = 0
 # 键值映射记录，存储前端key到当前使用的实际key的映射
 CURRENT_KEY_MAPPING = {}
 
+fua = FakeUserAgent()
+def fake_useragent() -> str:
+    return str(fua.random)
+
 # 添加从sophnet获取匿名token的功能
 async def get_anonymous_token(client_session: aiohttp.ClientSession) -> Optional[str]:
     """异步获取匿名token
@@ -129,7 +131,7 @@ async def get_anonymous_token(client_session: aiohttp.ClientSession) -> Optional
     
     # 准备请求头
     headers = {
-        "User-Agent": f"Mozilla/5.0 ({platform.system()} NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(90, 110)}.0.{random.randint(4000, 5000)}.{random.randint(10, 200)} Safari/537.36",
+        "User-Agent": fake_useragent(),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
@@ -560,20 +562,8 @@ class ChatForwarder:
                 payload_dict = orjson.loads(data)
                 headers = payload_dict.get("headers", {})
                 
-                # 随机生成Chrome版本号
-                chrome_major = random.randint(90, 120)
-                chrome_minor = random.randint(0, 9999)
-                chrome_build = random.randint(10, 200)
-                
-                # 随机选择操作系统
-                os_list = ["Windows NT 10.0", "Windows NT 11.0", "Macintosh; Intel Mac OS X 10_15", "X11; Linux x86_64"]
-                random_os = random.choice(os_list)
-                
-                # 构建随机User-Agent
-                user_agent = f"Mozilla/5.0 ({random_os}; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_major}.0.{chrome_minor}.{chrome_build} Safari/537.36"
-                
                 # 设置随机请求头
-                headers["User-Agent"] = user_agent
+                headers["User-Agent"] = fake_useragent()
                 headers["Accept"] = "application/json, text/plain, */*"
                 headers["Accept-Language"] = f"en-US,en;q=0.{random.randint(7, 9)}"
                 headers["Accept-Encoding"] = "gzip, deflate, br"
@@ -753,7 +743,7 @@ async def fetch_models():
             
             # 准备请求头
             headers = {
-                "User-Agent": f"Mozilla/5.0 ({platform.system()} NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.randint(90, 110)}.0.{random.randint(4000, 5000)}.{random.randint(10, 200)} Safari/537.36",
+                "User-Agent": fake_useragent(),
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
                 "Referer": "https://sophnet.com/",

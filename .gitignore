@@ -2,3 +2,4 @@ openai-chat-proxy-config.yaml
 .venv
 /config.yml
 *.log
+__pycache__
