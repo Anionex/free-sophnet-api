@@ -8,7 +8,7 @@ services:
       - "8000:8000"
     volumes:
       - ./config.yml:/app/config.yml:ro
-      - ./log:/app/log
+      - ./logs:/app/logs
       # - ./openai_chat_proxy.py:/app/openai_chat_proxy.py
     # stdin_open: true # docker run -i
     # tty: true # docker run -t
