@@ -9,7 +9,7 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./log:/app/log
-      - ./openai_chat_proxy.py:/app/openai_chat_proxy.py
+      # - ./openai_chat_proxy.py:/app/openai_chat_proxy.py
     # stdin_open: true # docker run -i
     # tty: true # docker run -t
     # restart: always

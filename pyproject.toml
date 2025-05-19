@@ -22,7 +22,7 @@ dependencies = [
 dev = ["pytest>=8.3.5"]
 
 [project.scripts]
-openai_chat_proxy = "openai_chat_proxy:main"
+openai_chat_proxy = "main:main"
 
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
