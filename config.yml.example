@@ -7,7 +7,7 @@ timeout: 30
 # 转发的目标基础URL
 # 可以是官方API: https://api.openai.com
 # 也可以是其他兼容的API服务: https://api.your-alt-service.com
-base_url: "https://sophnet.com"
+api_host: "https://sophnet.com"
 
 # 代理服务器URL(如果需要)
 # 示例: http://127.0.0.1:7890 推荐使用socks5
@@ -16,7 +16,7 @@ base_url: "https://sophnet.com"
 # 接收的请求路径始终为 /v1/chat/completions
 # 但会将请求转发到此处指定的目标路径
 # 例如，设置为 "/chat" 时，请求 /v1/chat/completions 会被转发到 https://api.openai.com/chat
-proxy_url_path: "/api/open-apis/projects/Ar79PWUQUAhjJOja2orHs/chat/completions"
+forward_chat_path: "/api/open-apis/projects/Ar79PWUQUAhjJOja2orHs/chat/completions"
 
 # 字段别名映射
 # 定义请求JSON数据中字段名的转换规则

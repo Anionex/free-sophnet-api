@@ -34,17 +34,38 @@
 
 2. 编辑 `config.yml` 文件，设置你的配置参数。
 
-### 启动服务
+### 依赖库
 
-在 Windows 系统上：
+使用项目的 pyproject.toml 安装:
 
 ```
-python openai_chat_proxy.py
+pip install -e .
+```
+
+✨推荐使用 `uv`:
+
+```
+uv sync # 环境安装
+uv run soph_forward # 运行
+```
+
+### 启动服务
+
+由于 uvloop 依赖不支持 windows, 故推荐在 linux 上启动:
+
+```
+python -m src.main
 ```
 
 服务默认在 `0.0.0.0:8000` 上启动，可以通过修改代码中的端口号来更改。
 
-### 启动服务(docker)
+### 启动服务(docker, ✨推荐)
+
+(可选步骤):
+1. 在 `docker-compose.yml` 中添加 `restart: always` 以开机自启动.
+2. 编辑 `ports` 端口映射 (服务在容器内监听 `8000` 端口).
+
+启动:
 
 ```
 docker compose up -d
@@ -68,11 +89,11 @@ Authorization: Bearer your_frontend_key
 
 ### 自定义转发路径
 
-你可以在配置文件中设置 `proxy_url_path` 参数来自定义转发目标的路径。例如：
+你可以在配置文件中设置 `forward_chat_path` 参数来自定义转发目标的路径。例如：
 
 ```yaml
 # 将请求转发到 SophNet 特定路径
-proxy_url_path: "/api/open-apis/projects/Ar79PWUQUAhjJOja2orHs/chat/completions"
+forward_chat_path: "/api/open-apis/projects/Ar79PWUQUAhjJOja2orHs/chat/completions"
 ```
 
 ### 字段别名映射
@@ -123,6 +144,7 @@ field_aliases:
 使用 curl 发送请求：
 
 ```powershell
+# powershell
 curl -X POST http://localhost:8000/v1/chat/completions `
   -H "Content-Type: application/json" `
   -H "Authorization: Bearer your_frontend_key" `
@@ -131,20 +153,6 @@ curl -X POST http://localhost:8000/v1/chat/completions `
     "messages": [{"role": "user", "content": "你好"}],
     "stream": true
   }'
-```
-
-## 依赖库
-
-需要安装以下 Python 依赖：
-
-```
-pip install aiohttp fastapi uvicorn loguru orjson pydantic pyyaml uvloop httptools
-```
-
-或使用项目的 pyproject.toml 安装：
-
-```
-pip install -e .
 ```
 
 ## 健康检查
@@ -178,29 +186,51 @@ http://localhost:8000/v1/models
 
 ```
 keepalive_timeout: 0
-force close: true
+force_close: true
 ```
 
-当配置了proxy，脚本会自动将请求头中的x-real-ip等字段统一设置为当前发起请求的IP地址。虽然实测没有太多差别；
+当配置了proxy，脚本会自动将请求头中的 `x-real-ip` 等字段统一设置为当前发起请求的IP地址。虽然实测没有太多差别；
 
-压测命令：
+压测命令(evalscope)：
 
-```
-evalscope perf \
-    --url "http://127.0.0.1:8000/v1/chat/completions" \
-    --parallel 16 \
-    --model "DeepSeek-V3-Fast" \
-    --number 100 \
-    --api openai \
-     --api-key "sk-2jc7k79eca#" \
-    --dataset openqa \
-    --stream
+```bash
+uv run tests/bench.py --host http://localhost:8000
+# 或
+python tests/bench.py --host http://localhost:8000
 ```
 
-优化前：
-![优化前](./assets/baseline.png)
+> [!NOTE]
+> 需要主程序正在运行, 上面的 `--host` 参数设置为主程序绑定的地址.
 
-使用上述优化后效果：
-![优化后](./assets/after_optimize.png)
+压测结果:
+
+| 项目                       | 优化前    | 优化后    |
+| :------------------------- | :-------- | :-------- |
+| 并发数                     | 16        | 16        |
+| 总请求数                   | 100       | 100       |
+| 成功请求数                 | 42        | 88        |
+| 失败请求数                 | 58        | 12        |
+| 输出吞吐量 (tok/s)         | 797.8415  | 951.4029  |
+| 总吞吐量 (tok/s)           | 827.2852  | 992.081   |
+| 请求吞吐量 (req/s)         | 1.4652    | 1.8644    |
+| 平均延迟 (s)               | 7.3841    | 7.6495    |
+| 平均首次 token 时间 (s)    | 0.8123    |           |
+| 平均每个输出 token 时间 (s) | 0.0122    |           |
+| 测试总耗时 (s)             |           | 47.1998   |
+
+优化后详细测试结果:
+
+| Percentiles | TTFT (s) | ITL (s) | TPOT (s) | Latency (s) | Input tokens | Output tokens | Output (tok/s) | Total (tok/s) |
+| :---------- | :------- | :------ | :------- | :---------- | :------------ | :------------ | :------------- | :------------ |
+| 10%         | 0.4447   | 0.0108  | 0.015    | 3.956       | 13            | 237           | 44.2754        | 48.2932       |
+| 25%         | 0.4718   | 0.0293  | 0.0154   | 7.0817      | 17            | 361           | 48.9376        | 51.8933       |
+| 50%         | 0.5084   | 0.0342  | 0.0174   | 8.8157      | 23            | 450           | 53.9693        | 57.393        |
+| 66%         | 0.528    | 0.0363  | 0.0183   | 9.545       | 26            | 526           | 58.0365        | 61.0627       |
+| 75%         | 0.5557   | 0.0391  | 0.019    | 10.0414     | 27            | 567           | 59.1532        | 62.4369       |
+| 80%         | 0.5686   | 0.0435  | 0.0194   | 10.2598     | 31            | 582           | 61.1363        | 63.1524       |
+| 90%         | 0.7113   | 0.0637  | 0.0205   | 10.8933     | 33            | 617           | 62.8718        | 66.3666       |
+| 95%         | 0.7288   | 0.0779  | 0.0216   | 11.759      | 35            | 670           | 65.0002        | 67.1137       |
+| 98%         | 0.957    | 0.1292  | 0.0225   | 13.7054     | 37            | 762           | 68.2566        | 73.3314       |
+| 99%         | 0.957    | 0.1763  | 0.0225   | 13.7054     | 37            | 762           | 68.2566        | 73.3314       |
 
 如果有更好的方法，欢迎交流！

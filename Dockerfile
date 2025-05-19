@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY ./pyproject.toml /app/
 COPY ./uv.lock /app/
-COPY openai_chat_proxy.py /app/
+COPY ./src/ /app/src
 
 # RUN apt update && apt install curl -y
 # RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -14,4 +14,4 @@ COPY openai_chat_proxy.py /app/
 RUN pip install uv
 RUN uv sync
 
-CMD ["uv", "run", "openai_chat_proxy.py"]
+CMD ["uv", "run", "soph_forward"]
