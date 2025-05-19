@@ -1,5 +1,5 @@
 import uvicorn
-from config import LOG_LEVEL, WORKERS
+from config import cfg_obj
 
 
 def main():
@@ -13,8 +13,8 @@ def main():
         "0.0.0.0",
         "--port",
         "8000",
-        f"--workers={WORKERS}",
-        f"--log-level={LOG_LEVEL.lower()}",
+        f"--workers={cfg_obj.workers}",
+        f"--log-level={cfg_obj.log_level.lower()}",
         "--loop=uvloop",
         "--http=httptools",
         "--limit-concurrency=1000",

@@ -1,40 +1,19 @@
 import asyncio
 import random
+from urllib.parse import urljoin
 from starlette.background import BackgroundTask
 from typing import Any, AsyncGenerator, Union
 import aiohttp
 from aiohttp_socks import ProxyConnector
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import orjson
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status, Request
-from config import (
-    CURRENT_KEY_MAPPING,
-    API_KEYS,
-    DEFAULT_MAX_TOKENS,
-    DEFAULT_MODEL,
-    DEFAULT_TEMPERATURE,
-    FIELD_ALIASES,
-    FORCE_CLOSE,
-    IP_BLACKLIST,
-    IP_WHITELIST,
-    MODELS_ROUTE,
-    TIMEOUT,
-    VALIDATE_IP,
-    logger,
-    BASE_URL,
-    PROXY_URL_PATH,
-    PROXY,
-    ROUTE_PREFIX,
-    CHAT_COMPLETION_ROUTE,
-    CONNECTION_LIMIT,
-    CONNECTION_LIMIT_PER_HOST,
-    KEEPALIVE_TIMEOUT,
-    WORKERS,
-)
-from soph import get_new_api_key
+from config import Config, logger, cfg_obj
+from const import CHAT_COMPLETION_ROUTE, MODELS_ROUTE
+from soph import fetch_models, get_new_api_key
 from utils import fake_useragent
 
 
@@ -42,34 +21,17 @@ from utils import fake_useragent
 async def lifespan(app: FastAPI):
     # 启动事件
     await forwarder.build_client()
-    logger.info("OpenAI 聊天代理服务已启动")
-    logger.info(f"转发目标: {BASE_URL}")
-    logger.info(f"转发路径: {PROXY_URL_PATH}")
-    if FIELD_ALIASES:
-        logger.info(f"字段别名: {FIELD_ALIASES}")
-    if PROXY:
-        logger.info(f"使用代理: {PROXY}")
-    logger.info(f"监听路径: {ROUTE_PREFIX}{CHAT_COMPLETION_ROUTE}")
-    logger.info(
-        f"连接池配置: 总连接数={CONNECTION_LIMIT}, 每主机连接数={CONNECTION_LIMIT_PER_HOST}, 连接保活={KEEPALIVE_TIMEOUT}秒"
-    )
-    logger.info(f"工作进程数: {WORKERS}")
-
-    # 初始化所有API keys映射
-    for frontend_key, actual_keys in API_KEYS.items():
-        if isinstance(actual_keys, list) and actual_keys:
-            CURRENT_KEY_MAPPING[frontend_key] = actual_keys[0]
-            logger.info(f"初始化API key映射: {frontend_key} -> {actual_keys[0][:5]}***")
+    logger.info("SophNet forwarding launched")
 
     yield  # 应用运行
 
     # 关闭事件
     await forwarder.close()
-    logger.info("OpenAI 聊天代理服务已关闭")
+    logger.info("SophNet forwarding closed")
 
 
 # 使用lifespan上下文管理器创建应用
-app = FastAPI(title="openai-chat-proxy", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="sophnet-forwarding", version="0.1.0", lifespan=lifespan)
 
 # CORS中间件
 app.add_middleware(
@@ -103,7 +65,7 @@ class ChatCompletionRequest(BaseModel):
     user: str | None = None
 
 
-def apply_field_aliases(data: dict) -> dict:
+def apply_field_aliases(data: dict[str, Any]) -> dict:
     """应用字段别名映射规则，转换字段名称
 
     Args:
@@ -112,23 +74,20 @@ def apply_field_aliases(data: dict) -> dict:
     Returns:
         dict: 转换后的请求数据
     """
-    if not FIELD_ALIASES or not isinstance(data, dict):
+    if not cfg_obj.field_aliases or not isinstance(data, dict):
         return data
 
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in data.items():
         # 如果当前字段有映射规则，使用目标字段名
-        target_key = FIELD_ALIASES.get(key, key)
+        target_key = cfg_obj.field_aliases.get(key, key)
 
         # 递归处理嵌套字典
         if isinstance(value, dict):
             result[target_key] = apply_field_aliases(value)
         # 递归处理列表中的每个字典
         elif isinstance(value, list):
-            result[target_key] = [
-                apply_field_aliases(item) if isinstance(item, dict) else item
-                for item in value
-            ]
+            result[target_key] = [apply_field_aliases(item) for item in value]
         else:
             result[target_key] = value
 
@@ -143,53 +102,42 @@ class ChatForwarder:
     # 添加IP跟踪字典
     request_ips = {}
 
-    def __init__(self, base_url: str, proxy_url_path: str, proxy=None):
-        """初始化转发器
-
-        Args:
-            base_url (str): 转发目标的基础URL
-            proxy_url_path (str): 转发目标的路径
-            proxy (str, optional): 代理服务器地址
-        """
-        self.base_url = base_url
-        self.proxy_url_path = proxy_url_path
-        self.proxy = proxy
+    def __init__(self, config: Config):
+        self.cfg = config.model_copy()
         self.client = None
-        self.timeout = aiohttp.ClientTimeout(connect=TIMEOUT)
+        self.timeout = aiohttp.ClientTimeout(connect=self.cfg.timeout)
         # 保存当前请求的前端key，用于在处理响应时切换API key
-        self.current_request_frontend_key = None
+        self.inbound_key: str | None = None
 
     async def build_client(self):
         """异步构建HTTP客户端"""
         # 如果使用SOCKS代理
-        if self.proxy and "socks" in self.proxy.lower():
+        if self.cfg.proxy and "socks" in self.cfg.proxy.lower():
             connector = ProxyConnector.from_url(
-                self.proxy,
-                **{
-                    "limit": CONNECTION_LIMIT,
-                    "limit_per_host": CONNECTION_LIMIT_PER_HOST,
-                    "force_close": FORCE_CLOSE,
-                    "enable_cleanup_closed": True,
-                    "ssl": False,
-                },
+                self.cfg.proxy,
+                limit=self.cfg.connection_limit,
+                limit_per_host=self.cfg.connection_limit_per_host,
+                force_close=self.cfg.force_close,
+                enable_cleanup_closed=True,
+                ssl=False,
             )
         else:
             # 原有的HTTP代理配置
-            connector_args = {
-                "limit": CONNECTION_LIMIT,
-                "limit_per_host": CONNECTION_LIMIT_PER_HOST,
-                "force_close": FORCE_CLOSE,
-                "enable_cleanup_closed": True,
-                "ssl": False,
-            }
-
-            if not FORCE_CLOSE:
-                connector_args["keepalive_timeout"] = KEEPALIVE_TIMEOUT
-
-            connector = aiohttp.TCPConnector(**connector_args)
+            connector = aiohttp.TCPConnector(
+                limit=self.cfg.connection_limit,
+                limit_per_host=self.cfg.connection_limit_per_host,
+                force_close=self.cfg.force_close,
+                enable_cleanup_closed=True,
+                ssl=False,
+                keepalive_timeout=None
+                if self.cfg.force_close
+                else self.cfg.keepalive_timeout,
+            )
 
         self.client = aiohttp.ClientSession(
-            connector=connector, timeout=self.timeout, json_serialize=orjson.dumps
+            connector=connector,
+            timeout=self.timeout,
+            json_serialize=lambda x: orjson.dumps(x).decode("utf-8"),
         )
 
     async def close(self):
@@ -197,39 +145,44 @@ class ChatForwarder:
         if self.client:
             await self.client.close()
 
-    def validate_request_ip(self, ip: str):
+    def validate_request_ip(self, ip: str | None):
         """验证请求IP是否允许访问
         Args:
-            ip (str): 客户端IP地址
+            ip (str | None): 客户端IP地址, 如果为 None 且黑/白名单不为空, 那么访问不允许
         Raises:
-            HTTPException: 如果IP不在白名单内或在黑名单内，抛出403错误
+            HTTPException: 如果IP不在白名单内或在黑名单内, 抛出403错误
+        Note:
+            黑名单优先
         """
-        if VALIDATE_IP:
-            if (IP_WHITELIST and ip not in IP_WHITELIST) or (
-                IP_BLACKLIST and ip in IP_BLACKLIST
+        if self.cfg.validate_ip:
+            # 黑名单优先
+            if (
+                not ip
+                or (self.cfg.ip_black_list and ip in self.cfg.ip_black_list)
+                or (self.cfg.ip_whitelist and ip not in self.cfg.ip_whitelist)
             ):
-                logger.warning(f"IP {ip} 未授权访问")
+                logger.info(f"IP {ip} access denied")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Forbidden Error",
                 )
 
-    def get_client_ip(self, request: Request) -> str:
+    def get_client_ip(self, request: Request) -> str | None:
         """从请求中获取客户端IP地址
         Args:
             request (Request): FastAPI请求对象
         Returns:
-            str: 客户端IP地址
+            str | None: 客户端IP地址
         """
         # 添加转发代理头部支持
         for header in ["x-real-ip", "x-forwarded-for"]:
             ip = request.headers.get(header)
             if ip:
                 # 如果是多个IP的列表，取第一个
-                return ip.split(",")[0].strip()
+                return ip.split(",", maxsplit=1)[0].strip()
 
         # 回退到客户端直连IP
-        return request.client.host
+        return request.client.host if request.client else None
 
     async def handle_authorization(self, auth_header: str) -> str:
         """处理授权信息
@@ -239,19 +192,20 @@ class ChatForwarder:
             str: 处理后的授权头部信息
         """
         if not auth_header:
-            logger.warning("没有提供授权信息")
+            logger.warning("no auth proviced")
+            return auth_header
+        if not auth_header.startswith("Bearer "):
+            logger.warning("not supported auth type")
             return auth_header
 
         # 假设auth_header格式为"Bearer YOUR_API_KEY"
         bearer_prefix = "Bearer "
-        self.current_request_frontend_key = auth_header[len(bearer_prefix) :]
-        if self.current_request_frontend_key in API_KEYS:
+        self.inbound_key = auth_header[len(bearer_prefix) :]
+        if self.inbound_key in self.cfg.api_keys:
             # 临时处理，始终使用新的token
-
-            new_key_token_str = await get_new_api_key(
-                self.current_request_frontend_key, self.client
-            )
-            return bearer_prefix + new_key_token_str
+            new_key = await get_new_api_key(self.inbound_key, self.client)
+            if new_key:
+                return bearer_prefix + new_key
 
         return auth_header
 
@@ -269,6 +223,7 @@ class ChatForwarder:
         Returns:
             aiohttp.ClientResponse: 响应对象
         """
+        assert self.client
         try:
             # 在发送请求前获取当前的IP地址
             request_id = random.randint(1, 1000000)
@@ -278,26 +233,28 @@ class ChatForwarder:
                 url=url,
                 data=data,
                 headers=headers,
-                proxy=self.proxy,
+                proxy=self.cfg.proxy,
                 allow_redirects=True,
             )
 
             # 获取请求使用的IP地址
-            if self.proxy:
+            if self.cfg.proxy:
                 # 发起一个请求来获取当前IP
                 try:
                     async with self.client.get(
-                        "https://api.ipify.org", proxy=self.proxy, timeout=5
+                        "https://api.ipify.org",
+                        proxy=self.cfg.proxy,
+                        timeout=5,  # type: ignore
                     ) as ip_response:
                         if ip_response.status == 200:
                             current_ip = await ip_response.text()
                             # 记录请求ID和IP
                             self.request_ips[request_id] = current_ip
                             logger.info(
-                                f"请求 ID {request_id} 使用代理IP: {current_ip}"
+                                f"Req ID {request_id}, IP: {current_ip}"
                             )
                 except Exception as e:
-                    logger.error(f"获取代理IP失败: {str(e)}")
+                    logger.error(f"Failed to get proxied ip: {str(e)}")
 
             return response
         except (
@@ -306,14 +263,16 @@ class ChatForwarder:
             aiohttp.ServerDisconnectedError,
             asyncio.TimeoutError,
         ) as e:
-            error_msg = f"连接到 {self.base_url} 失败: {type(e).__name__}: {str(e)}"
+            error_msg = (
+                f"Failed to connect to {self.cfg.api_host} : {type(e).__name__}: {e}"
+            )
             logger.error(error_msg)
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail=error_msg,
             )
         except Exception as e:
-            error_msg = f"请求处理出错: {type(e).__name__}: {str(e)}"
+            error_msg = f"Error in handling request: {type(e).__name__}: {e}"
             logger.error(error_msg)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -352,7 +311,7 @@ class ChatForwarder:
             dict: 请求信息
         """
         # 使用自定义目标路径
-        url = f"{self.base_url}{self.proxy_url_path}"
+        url = urljoin(self.cfg.api_host, self.cfg.forward_chat_path)
 
         # 提取请求头
         headers = dict(request.headers)
@@ -386,12 +345,13 @@ class ChatForwarder:
         Returns:
             StreamingResponse: 流式响应
         """
+        assert self.client
         client_ip = self.get_client_ip(request)
         self.validate_request_ip(client_ip)
 
         # 创建请求ID用于跟踪
         request_id = random.randint(1, 1000000)
-        logger.info(f"处理来自 {client_ip} 的新请求，ID: {request_id}")
+        logger.info(f"Req from {client_ip}, ID: {request_id}")
 
         original_data = await request.body()
         data: bytes | None = None  # Declare data here to be used in loop
@@ -402,21 +362,21 @@ class ChatForwarder:
 
                 # 如果未设置模型和参数，添加默认值
                 if "model" not in payload_dict:
-                    payload_dict["model"] = DEFAULT_MODEL
+                    payload_dict["model"] = self.cfg.default_model
                 if "temperature" not in payload_dict:
-                    payload_dict["temperature"] = DEFAULT_TEMPERATURE
+                    payload_dict["temperature"] = self.cfg.default_temperature
                 if "max_tokens" not in payload_dict:
-                    payload_dict["max_tokens"] = DEFAULT_MAX_TOKENS
+                    payload_dict["max_tokens"] = self.cfg.default_max_tokens
 
                 # 应用字段别名
-                if FIELD_ALIASES:
+                if self.cfg.field_aliases:
                     transformed_dict = apply_field_aliases(payload_dict)
                     payload_dict = transformed_dict
 
                 # 序列化回bytes
                 data = orjson.dumps(payload_dict)
             except Exception as e:
-                logger.error(f"处理请求数据时出错: {e}")
+                logger.error(f"Error handling request body: {e}")
                 data = original_data
         else:
             data = original_data
@@ -433,7 +393,7 @@ class ChatForwarder:
                 headers["Accept-Language"] = f"en-US,en;q=0.{random.randint(7, 9)}"
                 headers["Accept-Encoding"] = "gzip, deflate, br"
                 # 根据配置决定是否强制关闭连接
-                if FORCE_CLOSE:
+                if self.cfg.force_close:
                     headers["Connection"] = "close"
                 else:
                     headers["Connection"] = "keep-alive"
@@ -462,40 +422,34 @@ class ChatForwarder:
                 headers["Origin"] = random.choice(origins)
 
                 # 添加代理IP相关头
+                headers["X-Forwarded-For"] = random_ip
+                headers["Client-IP"] = random_ip
+                headers["x-real-ip"] = random_ip
                 # 使用当前代理池所指向的IP，而不是随机生成的IP
-                if self.proxy:
+                if self.cfg.proxy:
                     try:
                         # 尝试获取当前代理的真实IP
                         async with self.client.get(
-                            "https://api.ipify.org", proxy=self.proxy, timeout=5
+                            "https://api.ipify.org",
+                            proxy=self.cfg.proxy,
+                            timeout=5,  # type: ignore
                         ) as ip_response:
                             if ip_response.status == 200:
                                 proxy_ip = await ip_response.text()
                                 headers["X-Forwarded-For"] = proxy_ip
                                 headers["Client-IP"] = proxy_ip
                                 headers["x-real-ip"] = proxy_ip
-                                logger.info(f"使用代理IP设置请求头: {proxy_ip}")
-                            else:
-                                # 如果获取失败，仍使用随机IP
-                                headers["X-Forwarded-For"] = random_ip
-                                headers["Client-IP"] = random_ip
-                                headers["x-real-ip"] = random_ip
+                                logger.info(f"Use proxied ip in header: {proxy_ip}")
                     except Exception as e:
-                        logger.error(f"获取代理IP失败: {str(e)}，使用随机IP")
-                        headers["X-Forwarded-For"] = random_ip
-                        headers["Client-IP"] = random_ip
-                        headers["x-real-ip"] = random_ip
-                else:
-                    # 没有使用代理时，使用随机IP
-                    headers["X-Forwarded-For"] = random_ip
-                    headers["Client-IP"] = random_ip
-                    headers["x-real-ip"] = random_ip
+                        logger.error(
+                            f"Failed to fetch proxied ip: {str(e)}"
+                        )
 
                 # 更新payload并重新序列化
                 payload_dict["headers"] = headers
                 data = orjson.dumps(payload_dict)
             except Exception as e:
-                logger.error(f"设置随机请求头时出错: {e}")
+                logger.error(f"Error in preparing headers: {e}")
         # 记录最终发送到后端的数据
         if data:
             try:
@@ -504,8 +458,6 @@ class ChatForwarder:
                 )
             except UnicodeDecodeError:
                 logger.debug(f"PROXY -> BACKEND (final body bytes): {data!r}")
-
-        final_response_to_send = None
 
         for attempt in range(self.MAX_RETRIES + 1):
             self.current_request_frontend_key = None  # Reset for each attempt
@@ -548,21 +500,21 @@ class ChatForwarder:
                 try:
                     error_message = response_content.decode("utf-8")
                     logger.warning(
-                        f"收到429 Too Many Requests错误，URL: {request_info['url']}, 错误信息: {error_message}"
+                        f"ErrCode: 429 Too Many Requests, URL: {request_info['url']}, Msg: {error_message}"
                     )
 
                     # 获得此时的ip地址
                     async with self.client.get(
-                        "https://api.ipify.org", proxy=self.proxy, timeout=5
+                        "https://api.ipify.org", proxy=self.cfg.proxy, timeout=5 # type: ignore
                     ) as ip_response:
                         if ip_response.status == 200:
                             current_ip = await ip_response.text()
-                            logger.info(
-                                f"收到429 Too Many Requests错误，此时的IP地址: {current_ip}"
+                            logger.warning(
+                                f"ErrCode: 429 Too Many Requests, {current_ip=}"
                             )
                 except Exception as e:
                     logger.warning(
-                        f"收到429 Too Many Requests错误，但无法解析错误信息: {str(e)}"
+                        f"ErrCode: 429 Too Many Requests, {str(e)}"
                     )
 
             async def _final_content_streamer(content_bytes, original_resp_to_release):
@@ -579,11 +531,11 @@ class ChatForwarder:
             )
             break
 
-        return final_response_to_send
+        return final_response_to_send # type: ignore
 
 
 # 创建转发器，传入自定义转发路径
-forwarder = ChatForwarder(BASE_URL, PROXY_URL_PATH, PROXY)
+forwarder = ChatForwarder(cfg_obj)
 
 
 @app.get("/health")

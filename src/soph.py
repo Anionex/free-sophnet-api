@@ -2,8 +2,9 @@ import asyncio
 from datetime import datetime
 import random
 import time
-from config import CURRENT_KEY_MAPPING, MODELS_CACHE_TTL, SOPHNET_MODELS_API, logger
+from config import cfg_obj, logger
 import aiohttp
+from const import SOPHNET_MODELS_API
 from utils import fake_useragent
 
 
@@ -45,14 +46,16 @@ async def get_anonymous_token(client_session: aiohttp.ClientSession) -> str | No
     }
 
     try:
-        async with client_session.get(url, headers=headers, timeout=10) as response:
+        async with client_session.get(
+            url, headers=headers, timeout=aiohttp.ClientTimeout(connect=cfg_obj.timeout)
+        ) as response:
             if response.status == 200:
                 data = await response.json()
                 if data["status"] == 0 and "result" in data:
                     token = data["result"]["anonymousToken"]
                     return f"anon-{token}"
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logger.error(f"获取匿名token时出错: {e}")
+        logger.error(f"Error getting anonymous token: {e}")
         await asyncio.sleep(random.uniform(0.5, 1.0))  # 减少错误后等待时间
 
     return None
@@ -74,7 +77,6 @@ async def get_new_api_key(
         str: 新的API key
     """
     # 动态获取新key
-    logger.info(f"为 {frontend_key} 动态获取新的API key")
     # 创建一个临时会话或使用提供的会话
     close_session = False
     if client_session is None:
@@ -86,15 +88,15 @@ async def get_new_api_key(
         # 尝试获取新token
         token = await get_anonymous_token(client_session)
         if token:
-            logger.info(f"成功获取新token: {token[:10]}***")
+            logger.info(f"Updated token: {frontend_key}:{token[:10]}***")
             # 如果需要，更新映射
-            CURRENT_KEY_MAPPING[frontend_key] = token
+            cfg_obj.api_keys[frontend_key] = token
             return token
     finally:
         if close_session:
             await client_session.close()
 
-    logger.warning(f"前端key {frontend_key} 没有对应的API key，且无法动态获取")
+    logger.warning(f"{frontend_key} has no key corresponded.")
     return None
 
 
@@ -109,7 +111,7 @@ async def fetch_models():
 
     # 检查缓存是否有效
     current_time = time.time()
-    if models_cache and current_time - models_last_updated < MODELS_CACHE_TTL:
+    if models_cache and current_time - models_last_updated < cfg_obj.models_cache_ttl:
         return models_cache
 
     try:
@@ -119,7 +121,7 @@ async def fetch_models():
             # 直接获取匿名token
             token = await get_anonymous_token(session)
             if not token:
-                logger.warning("无法获取匿名token，模型列表请求可能会失败")
+                logger.warning("No soph token, model list might be invalid.")
                 # 如果仍有缓存，返回缓存
                 if models_cache:
                     return models_cache
@@ -136,12 +138,12 @@ async def fetch_models():
             # 设置匿名token头
             headers["Authorization"] = f"Bearer {token}"
 
-            logger.debug(f"获取模型列表使用的匿名token: {headers['Authorization']}...")
+            logger.debug(f"Fetching model list using auth: {headers['Authorization']}")
 
             # 发送请求获取模型列表
             async with session.get(SOPHNET_MODELS_API, headers=headers) as response:
                 if response.status != 200:
-                    logger.error(f"获取模型列表失败: {response.status}")
+                    logger.error(f"Failed to get model list: {response.status}")
                     if models_cache:  # 如果有缓存，返回缓存
                         return models_cache
                     return {"object": "list", "data": []}
@@ -150,7 +152,7 @@ async def fetch_models():
 
                 if sophnet_data.get("status") != 0 or "result" not in sophnet_data:
                     logger.error(
-                        f"sophnet API返回错误: {sophnet_data.get('message', '未知错误')}"
+                        f"sophnet API error: {sophnet_data.get('message', 'unknown')}"
                     )
                     if models_cache:
                         return models_cache
@@ -190,7 +192,7 @@ async def fetch_models():
                         "root": model_id,
                         "parent": None,
                     }
-                    openai_models["data"].append(openai_model)
+                    openai_models["data"].append(openai_model) # type: ignore
 
                 # 更新缓存和时间戳
                 models_cache = openai_models
@@ -198,7 +200,7 @@ async def fetch_models():
 
                 return openai_models
     except Exception as e:
-        logger.error(f"获取模型列表时出错: {e}")
+        logger.error(f"Error when fetching models: {e}")
         if models_cache:
             return models_cache
         return {"object": "list", "data": []}
