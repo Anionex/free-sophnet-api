@@ -585,10 +585,12 @@ class ChatForwarder:
 # 创建转发器，传入自定义转发路径
 forwarder = ChatForwarder(BASE_URL, PROXY_URL_PATH, PROXY)
 
+
 @app.get("/health")
 def health_check():
     """健康检查接口"""
     return {"status": "ok"}
+
 
 # 注册转发路由
 app.add_route(
@@ -602,21 +604,22 @@ app.add_route(
 @app.get(MODELS_ROUTE)
 async def list_models(request: Request):
     """获取可用的模型列表
-    
+
     Args:
         request (Request): FastAPI请求对象
-        
+
     Returns:
         JSONResponse: 模型列表
     """
     client_ip = forwarder.get_client_ip(request)
     forwarder.validate_request_ip(client_ip)
-    
+
     # 获取模型列表，总是使用匿名token
     models = await fetch_models()
-    
+
     # 返回JSON响应
     return JSONResponse(content=models)
+
 
 # 添加一个新的路由来查看IP使用情况
 @app.get("/proxy-stats")
@@ -625,5 +628,5 @@ def proxy_stats():
     return {
         "total_requests": len(forwarder.request_ips),
         "unique_ips": len(set(forwarder.request_ips.values())),
-        "recent_ips": dict(list(forwarder.request_ips.items())[-10:])  # 最近10条记录
+        "recent_ips": dict(list(forwarder.request_ips.items())[-10:]),  # 最近10条记录
     }
