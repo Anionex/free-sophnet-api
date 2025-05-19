@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.11.18",
+    "aiohttp-socks>=0.10.1",
     "fastapi>=0.115.12",
     "httptools>=0.6.4",
     "loguru>=0.7.3",
@@ -18,3 +19,7 @@ dependencies = [
 
 [project.scripts]
 openai_chat_proxy = "openai_chat_proxy:main"
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
