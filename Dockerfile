@@ -12,6 +12,6 @@ COPY ./src/ /app/src
 # CMD ["/root/.local/bin/uv", "run", "openai_chat_proxy.py"]
 
 RUN pip install uv
-RUN uv venv && uv pip install -e .
+RUN uv sync
 
-CMD ["uv", "run", "openai_chat_proxy"]
+CMD ["uv", "run", "soph_forward"]
