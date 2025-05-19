@@ -7,7 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.11.18",
     "aiohttp-socks>=0.10.1",
-    "evalscope[perf]>=0.16.0",
     "fake-useragent>=2.2.0",
     "fastapi>=0.115.12",
     "httptools>=0.6.4",
@@ -20,7 +19,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3.5"]
+dev = ["pytest>=8.3.5", "evalscope[perf]>=0.16.0"]
 
 [project.scripts]
 soph_forward = "main:main"
