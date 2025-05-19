@@ -1,7 +1,7 @@
 # Free SophNet API 代理
 
 > **声明：**  
-> 仅供网络安全学习交流使用 
+> 仅供网络安全学习交流使用
 > 请在24小时内删除，造成的任何后果与项目开发者无关
 
 这是一个轻量级的 API 代理服务，专注于转发请求到 SophNet API 服务。支持流式响应输出，API 密钥映射，自动获取匿名 token，以及 IP 访问控制。
@@ -163,18 +163,19 @@ http://localhost:8000/health
 http://localhost:8000/v1/models
 ```
 
-
 ## 如何获得更好的性能？
 
 研究发现性能瓶颈在于官网对/chat/completions接口的rate limit。因此解决方案是使用代理池发出请求以尽量减少被限制的次数。
 
 在config.yml中配置代理：
+
 ```
 # 代理服务器URL(如果需要)
 # 示例: socks5://127.0.0.1:7890 推荐使用socks5
 ```
 
 同时，在config.yml中设置参数：
+
 ```
 keepalive_timeout: 0
 force close: true
@@ -183,6 +184,7 @@ force close: true
 当配置了proxy，脚本会自动将请求头中的x-real-ip等字段统一设置为当前发起请求的IP地址。虽然实测没有太多差别；
 
 压测命令：
+
 ```
 evalscope perf \
     --url "http://127.0.0.1:8000/v1/chat/completions" \
