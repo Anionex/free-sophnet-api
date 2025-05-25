@@ -25,14 +25,17 @@
 ## 快速开始
 
 ### 配置
-
+```
+git clone https://github.com/Anionex/free-sophnet-api
+cd free-sophnet-api
+```
 1. 复制示例配置文件并根据需要修改：
 
    ```
-   copy config.yml.example config.yml
+   cp config.yml.example config.yml
    ```
 
-2. 编辑 `config.yml` 文件，设置你的配置参数。
+2. 编辑 `config.yml` 文件，设置你的配置参数(也可以直接全部保持默认)。
 
 ### 依赖库
 
