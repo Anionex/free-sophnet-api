@@ -23,7 +23,14 @@
 - 该接口也支持function call/tool call功能
 
 ## 快速开始
-
+### 小白向快速启动脚本
+（linux需要安装docker compose，windows需要先安装docker desktop）
+```
+git clone https://github.com/Anionex/free-sophnet-api
+cd free-sophnet-api
+cp config.yml.example config.yml
+docker compose up -d
+```
 ### 配置
 ```
 git clone https://github.com/Anionex/free-sophnet-api
