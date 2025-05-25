@@ -31,7 +31,7 @@ cd free-sophnet-api
 cp config.yml.example config.yml
 docker compose up -d
 ```
-### 配置
+### 从源码开始启动（进阶向）
 ```
 git clone https://github.com/Anionex/free-sophnet-api
 cd free-sophnet-api
@@ -89,7 +89,7 @@ docker compose up -d
 http://localhost:8000/v1/chat/completions
 ```
 
-在请求头中使用你在配置文件中设置的前端密钥：
+在请求头中使用你在配置文件中设置的前端密钥（默认为sk-2jc7k79eca#）：
 
 ```
 Authorization: Bearer your_frontend_key
