@@ -18,18 +18,18 @@
 - IP 白名单/黑名单访问控制
 - 可配置的请求和响应日志记录
 - 支持 HTTP 代理
-- 健康检查 API
+- 健康检查
 - 支持获取模型列表
-- 该接口也支持function call/tool call功能
 
 ## 快速开始
 ### 小白向快速启动脚本
-（linux需要安装docker compose，windows需要先安装docker desktop）
+（linux需要先安装docker compose，windows需要先安装docker desktop）
 ```
 git clone https://github.com/Anionex/free-sophnet-api
 cd free-sophnet-api
 cp config.yml.example config.yml
 docker compose up -d
+# 请求默认密匙为“sk-2jc7k79eca#”
 ```
 ### 从源码开始启动（进阶向）
 ```
@@ -46,13 +46,13 @@ cd free-sophnet-api
 
 ### 依赖库
 
-使用项目的 pyproject.toml 安装:
-
+使用项目的 pyproject.toml 安装:<br>
+使用pip来安装：
 ```
 pip install -e .
 ```
 
-✨推荐使用 `uv`:
+✨或者使用 `uv`（推荐）:
 
 ```
 uv sync # 环境安装
@@ -153,6 +153,17 @@ field_aliases:
 
 使用 curl 发送请求：
 
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_frontend_key" \
+  -d '{
+    "model": "DeepSeek-V3-Fast",
+    "messages": [{"role": "user", "content": "你好"}],
+    "stream": true
+  }'
+```
+
 ```powershell
 # powershell
 curl -X POST http://localhost:8000/v1/chat/completions `
@@ -243,4 +254,4 @@ python tests/bench.py --host http://localhost:8000
 | 98%         | 0.957    | 0.1292  | 0.0225   | 13.7054     | 37            | 762           | 68.2566        | 73.3314       |
 | 99%         | 0.957    | 0.1763  | 0.0225   | 13.7054     | 37            | 762           | 68.2566        | 73.3314       |
 
-如果有更好的方法，欢迎交流！
+本人水平有限，仅作参考 如果有更好的方法，欢迎交流！
